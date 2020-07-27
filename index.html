@@ -1,0 +1,656 @@
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="https://unpkg.com/element-ui/lib/theme-chalk/index.css"> 
+<script src="https://unpkg.com/vue/dist/vue.js"></script>
+<script src="https://unpkg.com/element-ui/lib/index.js"></script>
+<script src="http://pv.sohu.com/cityjson?ie=utf-8"></script> <!--get user ip-->
+<style>
+  
+.el-header, .el-footer {
+    background-color: #B3C0D1;
+    color: #333;
+    text-align: center;
+    line-height: 50px;
+  }
+  
+  .el-aside {
+    background-color: #D3DCE6;
+    color: #333;
+  }
+  
+  .el-main {
+    background-color: #E9EEF3;
+    color: #333;
+	//text-align: center;
+  }
+  
+  body > .el-container {
+    margin-bottom: 45px;
+  }
+  
+  .el-container:nth-child(5) .el-aside,
+  .el-container:nth-child(6) .el-aside {
+    line-height: 260px;
+  }
+  
+  .el-container:nth-child(7) .el-aside {
+    line-height: 320px;
+  }
+  
+  .el-form {
+    width:300px;
+    position:relative;
+	left:750px; 
+  }
+  
+  .strike_col {
+	background-color: #FFEC8B;
+  }
+  
+  .expired_col {
+	background-color: #9AFF9A;
+  }
+  
+  .fwd_css {
+	height:30px;
+	color: blue;
+	font-size:17px;
+	text-align: center;
+  }
+
+  .calibrate_css {
+	color: blue;
+	font-size:16px;
+	text-align: right;
+  }
+
+</style>
+</head>
+<body onload="connect()">
+<div id="app">
+<el-container>
+  <el-header>Amber Option Pricing System</el-header>
+  <el-main>
+  <!--
+	 <el-form ref="form" :model="form" label-width="80px" style="">
+		  <el-form-item label="行权价格">
+			<el-input v-model="form.strike"></el-input>
+		  </el-form-item>
+		  <el-form-item label="到期日">
+			<el-col>
+			  <el-date-picker type="date" placeholder="选择日期" v-model="form.DTM" value-format="yyyy-MM-dd">
+			  </el-date-picker>
+			</el-col>
+		  </el-form-item>
+		  <el-form-item label="Spread">
+			<el-input v-model="form.spread"></el-input>
+		  </el-form-item>
+		  <el-form-item>
+			<el-button type="primary" @click="onSubmit">报价</el-button>
+			<el-button>取消</el-button>
+		  </el-form-item>
+	</el-form>
+	-->
+
+		<el-row>
+			<el-col :span="1">
+				<el-select v-model="currency" size="small" @change="currencyChange">
+					<el-option
+					   v-for="item in base_currency"
+					   v-bind:key="item.id"
+					  :label="item.name"
+					  :value="item.id">
+					</el-option>
+				</el-select>
+			</el-col>
+			<el-col :span="2">
+				<el-select v-model="currency" size="big">
+					<el-option
+					   v-for="item in option_type"
+					   v-bind:key="item.id"
+					  :label="item.name"
+					  :value="item.id">
+					</el-option>
+				</el-select>
+			</el-col>
+			<el-col :span="3">
+				<el-input v-model="form.strike">
+					<template slot="prepend">行权价格:</template>	
+				</el-input>   				
+			</el-col>
+ 
+			<el-col :span="3">
+				<el-date-picker type="date" placeholder="选择到期日" v-model="form.DTM" value-format="yyyy-MM-dd">
+			  </el-date-picker>
+			</el-col>
+			<el-col :span="3">
+				<el-input v-model="form.spread">
+					<template slot="prepend">bid/ask价差%:</template>	
+				</el-input>                               
+			</el-col>
+			<el-col :span="1">
+				<el-button type="primary" @click="onSubmit">报价</el-button>                
+			</el-col>
+		</el-row>	
+		<el-row> 
+			<el-col>
+				<div class="fwd_css">
+					Underlying:${{index_price}}
+				</div>
+			</el-col>
+		</el-row>
+		<el-row>
+			<el-table size="mini" :data="contracts" border height="350">
+				<el-table-column  sortable prop="forward" label="Foward" width="110">
+				</el-table-column>
+			    <el-table-column  sortable prop="call_bid_iv" label="Bid IV" width="110">
+				</el-table-column>
+				<el-table-column  sortable prop="call_bid" label="Bid" width="175">
+				</el-table-column>
+				<el-table-column  sortable prop="call_ask" label="Ask" width="175">
+				</el-table-column>
+				<el-table-column  sortable prop="call_ask_iv" label="Ask IV" width="110">
+				</el-table-column>
+				<el-table-column  label="Call Delta" width="130">
+					<template slot-scope="scope">
+						<el-popover trigger="hover" placement="top">
+						  <ul>
+							<li>Gamma: {{ scope.row.call_gamma }}</li>
+							<li>Vega: {{ scope.row.call_vega }}</li>
+							<li>Theta: {{ scope.row.call_theta }}</li>
+						 </ul>
+						  <div slot="reference">
+								{{ scope.row.call_deltas }}
+						  </div>
+						</el-popover>
+					</template>
+				</el-table-column>
+				<el-table-column  sortable prop="strike" label="Strike" class-name="strike_col" width="100">
+				</el-table-column>
+				<el-table-column  sortable prop="expired" label="Expired Date" class-name="expired_col" width="150">
+				</el-table-column>
+				<el-table-column  label="Put Delta" width="130">
+					<template slot-scope="scope">
+						<el-popover trigger="hover" placement="top">
+						  <ul>
+							<li>Gamma: {{ scope.row.put_gamma }}</li>
+							<li>Vega: {{ scope.row.put_vega }}</li>
+							<li>Theta: {{ scope.row.put_theta }}</li>
+						 </ul>
+						  <div slot="reference">
+								{{ scope.row.put_deltas }}
+						  </div>
+						</el-popover>
+					</template>
+				</el-table-column>
+				<el-table-column  sortable prop="put_bid_iv" label="Bid IV" width="110">
+				</el-table-column>
+				<el-table-column  sortable prop="put_bid" label="Bid" width="175">
+				</el-table-column>
+				<el-table-column  sortable prop="put_ask" label="Ask" width="175">
+				</el-table-column>
+				<el-table-column  sortable prop="put_ask_iv" label="Ask IV" width="110">
+				</el-table-column>
+
+				<el-table-column
+				  label=""
+				  width="85">
+				  <template slot-scope="scope">
+					<el-button
+					  @click="deleteRow(scope.$index, scope.row)"
+					  type="danger"
+					  size="mini">
+					  移除
+					</el-button>
+				  </template>
+				</el-table-column>
+
+			</el-table>
+		</el-row>
+		<el-row>
+			<el-col :span="19">
+				<el-row class="calibrate_css"> 
+					<el-col :span="13">
+						<div>
+							<b>{{point_mode}}</b> Points
+						</div>
+					</el-col>
+					<el-col :span="10">
+						<el-button
+						  @click="reCalibrate()"
+						  type="warning"
+						  size="mini" >
+						  校正
+						</el-button>
+					</el-col>
+					<el-col :span="1">
+						<el-button
+						  @click="resetSABR()"
+						  type="success"
+						  size="mini" >
+						  重置
+						</el-button>
+					</el-col>
+				</el-row>		
+				<el-row>
+					<el-table ref="pointTable" size="mini" :data="points" border row-key="id" highlight-current-row>
+						<el-table-column  sortable prop="exp" label="Expiration">
+							<template slot-scope="scope">
+								<span v-if="scope.row.isFreezed">
+									<i class="el-icon-lock" style="color: blue;">{{scope.row.exp}}</i> 
+								</span>
+								<span v-else>{{scope.row.exp}}</span>
+							</template>
+						</el-table-column>
+						<el-table-column  sortable prop="symbol" label="Symbol">
+							<template slot-scope="scope">
+								<span v-if="scope.row.isSet && !scope.row.children">
+									<el-input size="mini" placeholder="请输入内容" v-model="selected_row.symbol">
+									</el-input>
+								</span>
+								<span v-else>{{scope.row.symbol}}</span>
+							</template>
+						</el-table-column>
+						<el-table-column  sortable prop="ATM" label="ATM">
+						</el-table-column>
+						<el-table-column  sortable prop="bid_iv" label="Bid_IV">
+							<template slot-scope="scope">
+								<span v-if="scope.row.isSet && !scope.row.children">
+									<el-input size="mini" placeholder="请输入内容" v-model="selected_row.bid_iv">
+									</el-input>
+								</span>
+								<span v-else>{{scope.row.bid_iv}}</span>
+							</template>
+						</el-table-column>
+						<el-table-column  sortable prop="ask_iv" label="Ask_IV">
+							<template slot-scope="scope">
+								<span v-if="scope.row.isSet && !scope.row.children">
+									<el-input size="mini" placeholder="请输入内容" v-model="selected_row.ask_iv">
+									</el-input>
+								</span>
+								<span v-else>{{scope.row.ask_iv}}</span>
+							</template>
+						</el-table-column>
+						
+						<el-table-column label="操作" width="150">
+								<template slot-scope="scope">
+									<span v-if="!scope.row.children">
+										<span class="el-tag el-tag--info el-tag--mini" style="cursor: pointer;" @click="updatePoint(scope.row,true)">
+											{{scope.row.isSet?'保存':"修改"}}
+										</span>
+										<span v-if="!scope.row.isSet" class="el-tag el-tag--danger el-tag--mini" style="cursor: pointer;" @click="deletePoint(scope.row)">
+											删除
+										</span>
+										<span v-else class="el-tag  el-tag--mini" style="cursor: pointer;" @click="updatePoint(scope.row,false)">
+											取消
+										</span>
+										<span class="el-tag  el-tag--mini" style="cursor: pointer;" @click="freezePoint(scope.row)">
+											{{scope.row.isFreezed?'解除':"固定"}}
+										</span>
+									</span>
+									<span v-else class="el-tag  el-tag--success el-tag--mini" style="cursor: pointer;" @click="addPoint(scope.row)">
+											添加
+									</span>
+								</template>
+						</el-table-column>
+					</el-table>
+				</el-row>
+			</el-col>
+			<el-col :span="5">
+				<el-image
+				  style="width: 375px; height: 390px; padding: 10px 10px;"
+				  :src="calibrate_img"
+				  :preview-src-list="calibrate_img_larges"
+				  fit="cover"
+				  v-loading="imageLoading"
+				  >
+			    </el-image>
+			</el-col >
+		</el-row>
+  </el-main>
+</el-container>
+
+</div>
+<script>
+client_ip = returnCitySN["cip"].replace(/\./g,"")
+//new Vue().$mount('#app')
+vue_app = new Vue({
+            el: '#app',
+			data: function () {
+                return { 
+					form: {
+					  strike: 6500,
+					  DTM: '',
+					  spread: 10
+					},
+					currency:"BTC",
+					base_currency:[
+						{name:'BTC', id:'BTC'},
+						{name:'ETH', id:'ETH'},
+					],	
+					option_type:[
+						{name:'barrier', id:'BTC'},
+						{name:'double_barrier', id:'ETH'},
+					],
+					contracts:[],
+					index_price:"",
+					points:[],
+					selected_row:{},
+					calibrate_img:"",
+					calibrate_img_larges:[],
+					imageLoading:false,
+					freezePoints:[],
+					point_mode:"Market"
+				}
+			},
+			methods: {
+				onSubmit() {
+					const that = this;
+					
+					var reg=/^\d+$/;
+					if(!reg.test(that.form.strike))
+					{
+						that.$notify({ title: 'Error', message:"Strike price setting error", type: 'error', duration: 2000, });
+						return
+					}
+					
+					var reg = /^\d+(\.\d+)?$/;
+					if(!reg.test(that.form.spread))
+					{
+						that.$notify({ title: 'Error', message:"spread setting error", type: 'error', duration: 2000, });
+						return
+					}
+					
+					if(that.form.DTM=="")
+					{
+						that.$notify({ title: '警告', message:"请选择期权到期日", type: 'error', duration: 2000, });
+						return
+					}
+					
+					var today = new Date()
+					//var date_format = today.getFullYear()+"/"+(today.getMonth()+1)+"/"+today.getDate()
+					//today = new Date(date_format)
+					var DTM = new Date(that.form.DTM) 
+					
+					if(DTM<today)
+					{
+						that.$notify({ title: 'Error', message:"期权到期日需大于今天", type: 'error', duration: 2000, });
+						return
+					}
+							
+					var query = {func:"generate_price",args:[that.form.DTM,that.form.strike,that.form.spread,that.currency,client_ip]};
+					ws.send(JSON.stringify(query));	 
+			    },
+				deleteRow(index) {
+						const that = this;
+						//that.contracts = that.contracts.filter(record => record.name != value); 
+						that.contracts.splice(index, 1);
+				},
+				//添加
+                addPoint(row) {
+					const that = this;
+                    var j = { id: generateId.get(), "exp": row.exp, "symbol": "", "bid_iv": "", "ask_iv": "", "isSet": true};
+					var expiration = that.points.find(i=>i.exp==row.exp)
+					expiration.children.push(j) 
+					that.selected_row = JSON.parse(JSON.stringify(row));
+                },
+				//修改
+                updatePoint(row, cg) {
+					const that = this;
+                    //是否是取消操作
+                    if (!cg) {                        
+						if (!that.selected_row.bid_iv)
+						{
+							var expiration = that.points.find(i=>i.exp==row.exp)
+							expiration.children = expiration.children.filter(i => i.id != row.id)
+						}
+						that.$refs.pointTable.setCurrentRow(); 
+                        return row.isSet = false;
+                    }
+					
+					//提交数据
+					if (row.isSet) {
+						var reg = /^\d+(\.\d+)?$/;
+						if(!reg.test(that.selected_row.bid_iv) || !reg.test(that.selected_row.ask_iv))
+						{
+							that.$notify({ title: 'Error', message:"ask iv or bid iv setting error", type: 'error', duration: 2000, });
+							return
+						}
+						row.symbol = that.selected_row.symbol
+						row.bid_iv = that.selected_row.bid_iv
+						row.ask_iv = that.selected_row.ask_iv
+						row.isSet = false;
+						that.$message({type: 'success',message: "保存成功!"}); 
+					}else {
+						//修改数据框生效
+						that.selected_row = JSON.parse(JSON.stringify(row));
+						row.isSet = true;
+					} 
+                    that.$refs.pointTable.setCurrentRow(); 
+                },
+				deletePoint(row) {
+						const that = this;
+						if(row.isFreezed)
+						{
+							that.$notify({ title: 'Error', message:"Please unlock this row before delete!", type: 'error', duration: 2000, });
+							return
+						}
+					
+						var expiration = that.points.find(i=>i.exp==row.exp)
+						expiration.children = expiration.children.filter(i => i.symbol != row.symbol)
+				},
+				freezePoint(row){
+					const that = this;
+					if(row.isSet)
+					{
+						that.$notify({ title: 'Error', message:"Please save the row before freeze!", type: 'error', duration: 2000, });
+						return
+					}
+					
+					row.isFreezed = !row.isFreezed;
+					if(row.isFreezed)
+					{
+						var point = that.freezePoints.find(i=>i.symbol==row.symbol)
+						if(point)
+						{
+							point.symbol = row.symbol
+							point.bid_iv = row.bid_iv
+							point.ask_iv = row.ask_iv
+						}
+						else
+						that.freezePoints.push(row)
+					}else
+						that.freezePoints = that.freezePoints.filter(i => i.symbol != row.symbol)
+					
+					that.$refs.pointTable.setCurrentRow(); 
+					//return row.isFreezed
+				},
+				reCalibrate(){
+					const that = this;
+					that.imageLoading = true;
+					that.point_mode = "User";
+					var query = {func:"user_gen_vols",args:[that.points,that.currency,client_ip]};
+					ws.send(JSON.stringify(query));	
+
+				},
+				resetSABR(){
+					const that = this;
+					that.imageLoading = true;
+					that.point_mode = "Market";
+					var query = {func:"reset_vols",args:[that.currency,client_ip]};
+					ws.send(JSON.stringify(query));	
+				},
+				currencyChange(value){
+					const that = this;
+					if(value=="BTC")
+						that.form.strike = 6500
+					else
+						that.form.strike = 200
+			    },
+			}
+		})
+		
+function connect() 
+{
+	if ("WebSocket" in window) 
+	{ 
+		var wsUrl = 'ws://10.96.3.188:8082'
+		ws = new WebSocket(wsUrl); 
+		
+		ws.onopen=function(e){ // on successful connection, we want to create an initial subscription to load all the data into the page 
+			console.log('socket connection established');
+			var query = {func:"register_user",args:client_ip};
+			ws.send(JSON.stringify(query));	 
+			heartCheck.reset().start();
+		}; 
+		
+		ws.onclose=function(e){
+			reconnect(wsUrl);
+			console.log("llws连接错误!");
+		};
+		
+		ws.onmessage=function(e){ 
+			//console.log(e.data)
+			try{
+				var values = JSON.parse(e.data);
+				var fn = window[values.func];
+				fn(values.data);
+			}catch(error){
+				console.log(error)
+				console.log(e.data)
+			}
+		}; 
+		
+		ws.onerror=function(e){
+			reconnect(wsUrl);
+			console.log("llws连接错误!");
+		}; 
+
+	} 
+		else console.log('you browser dose not support websocket!');
+	
+}
+
+
+function on_generate_price(data)
+{
+	data['forward'] = data['fwd_price']
+	data['strike'] = vue_app.form.strike
+	data['expired'] = vue_app.form.DTM
+	vue_app.contracts.push(data);
+	vue_app.index_price = data['index_price']
+	vue_app.points = data['points']
+	
+	vue_app.points.map(i => {
+		i.isFreezed=false;
+		return i;
+	});
+					
+	vue_app.freezePoints.forEach(function(item){
+		this_currency = item.symbol.split("-")[0]
+		if(this_currency!=vue_app.currency)
+			return
+			
+		item.id = generateId.get();
+		var expiration = vue_app.points.find(i=>i.exp==item.exp)
+		if(expiration)
+		{
+			var point = expiration.children.find(i=>i.symbol==item.symbol)
+			if(point)
+			{
+				point.id = item.id
+				point.isFreezed = item.isFreezed
+				point.bid_iv = item.bid_iv
+				point.ask_iv = item.ask_iv
+			}
+			else
+				expiration.children.push(item)
+		}
+		else
+		{
+			var new_exp = { id: generateId.get(), "exp": item.exp, "symbol": "", "bid_iv": "", "ask_iv": "", "children":[item]};
+			vue_app.points.push(new_exp)
+		}
+ 
+	})
+ 
+}
+
+function on_user_gen_vols(filename)
+{
+	vue_app.imageLoading = false;
+	if(filename!="error")
+	{
+		vue_app.calibrate_img = 'images/'+filename
+		vue_app.calibrate_img_larges = [vue_app.calibrate_img]
+	}else
+		vue_app.$notify({ title: 'Error', message:"unable to calibrate, please check your calibration points", type: 'error', duration: 2000, });
+}
+
+
+function on_reset_vols(filename)
+{
+	vue_app.imageLoading = false;
+	vue_app.calibrate_img = 'images/'+filename
+	vue_app.calibrate_img_larges = [vue_app.calibrate_img]
+}
+
+function on_register_user(data)
+{
+	
+}
+
+function on_heart_check(data)
+{
+	heartCheck.reset().start(); 
+	console.log("get heart beat form server");
+}
+
+// 监听窗口关闭事件，当窗口关闭时，主动去关闭websocket连接，防止连接还没断开就关闭窗口，server端会抛异常。
+window.onbeforeunload = function() {
+	ws.close();
+} 
+
+var generateId = {
+	_count: 1,
+	get(){return ((+new Date()) + "_" + (this._count++))}
+};
+		
+var lockReconnect = false;
+function reconnect(url) {
+	if(lockReconnect) return;
+	lockReconnect = true;
+	setTimeout(function () {     //没连接上会一直重连，设置延迟避免请求过多
+		connect();
+		lockReconnect = false;
+	}, 2000);
+}
+
+//心跳检测
+var heartCheck = {
+	timeout: 60000,        //1分钟发一次心跳
+	timeoutObj: null,
+	serverTimeoutObj: null,
+	reset: function(){
+		clearTimeout(this.timeoutObj);
+		clearTimeout(this.serverTimeoutObj);
+		return this;
+	},
+	start: function(){
+		var self = this;
+		this.timeoutObj = setTimeout(function(){
+			//这里发送一个心跳，后端收到后，返回一个心跳消息，
+			//onmessage拿到返回的心跳就说明连接正常
+			var query = {func:"heart_check",args:"1"};
+			ws.send(JSON.stringify(query));
+			self.serverTimeoutObj = setTimeout(function(){//如果超过一定时间还没重置，说明后端主动断开了
+				ws.close();     //如果onclose会执行reconnect，我们执行ws.close()就行了.如果直接执行reconnect 会触发onclose导致重连两次
+			}, self.timeout)
+		}, this.timeout)
+	}
+}
+		
+</script>
+</body>
+</html>
