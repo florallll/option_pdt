@@ -1,0 +1,761 @@
+<html>
+<head>
+<meta charset="utf-8">
+<title>Amber Booking System</title>
+<script src="http://underscorejs.org/underscore-min.js"></script>
+<script src="https://code.jquery.com/jquery-3.4.1.min.js" integrity="sha256-CSXorXvZcTkaix6Yvo6HppcZGetbYMGWSFlBw8HfCJo=" crossorigin="anonymous"></script>
+<link rel="stylesheet" href="https://unpkg.com/element-ui/lib/theme-chalk/index.css"> 
+<script src="https://unpkg.com/vue/dist/vue.js"></script>
+<script src="https://unpkg.com/element-ui/lib/index.js"></script>
+<style>
+  
+.el-header, .el-footer {
+    background-color: #B3C0D1;
+    color: #333;
+    text-align: center;
+    line-height: 60px;
+  }
+  
+  .el-aside {
+    background-color: #D3DCE6;
+    color: #333;
+  }
+  
+  .el-main {
+    background-color: #E9EEF3;
+    color: #333;
+	height:860px;
+	padding:10px;
+	text-align: center;
+  }
+  
+  body > .el-container {
+    margin-bottom: 40px;
+  }
+  
+.el-container:nth-child(5) .el-aside,
+.el-container:nth-child(6) .el-aside {
+    line-height: 260px;
+}
+  
+  .el-container:nth-child(7) .el-aside {
+    line-height: 320px;
+  }
+  
+.el-form {
+    width:300px;
+    position:relative;
+	left:750px; 
+}
+  
+  .strike_col {
+	background-color: #FFEC8B;
+  }
+  
+  .expired_col {
+	background-color: #9AFF9A;
+  }
+  
+  .fwd_css {
+	height:30px;
+	color: blue;
+	font-size:15px;
+	text-align: center;
+  }
+
+  .calibrate_css {
+	color: blue;
+	font-size:15px;
+	text-align: right;
+  }
+
+  .config-drawer__footer{
+	 margin-left: 40px;
+  }
+
+/* 自定义-表格样式  */
+.table-text-blue{
+ color: $blueColor;
+ cursor:pointer;
+}
+.table-text-gray{
+  color: $grayColor;
+}
+.el-table th.is-leaf{
+  background:#F9F9F9; 
+  border-bottom: none;
+}
+.el-table--border th{
+  border-color:#FFF;
+  font-weight: normal;
+}
+.el-table--border{
+  border:none;
+}
+.el-table,.el-table thead{
+  color:$tableColor;
+  font-size:8px
+}
+.el-table--border::after, .el-table--group::after{
+  background-color: #fff;
+}
+.el-table--border td{
+  border-right: 1px solid $tableBc;
+}
+
+</style>
+</head>
+<body onload="connect()">
+<div id="app">
+<el-dialog title="请确认需要记录的仓位" :visible.sync="BookingVisible" :close-on-click-modal="false" :lock-scroll="true">
+	<el-table :data="position_entry" stripe :show-header="false" height="400">
+    <el-table-column prop="col" label="标题">
+    </el-table-column>
+	<el-table-column prop="value" label="内容">
+    </el-table-column>
+  </el-table>
+	<div slot="footer" class="dialog-footer">
+		<el-button type="primary" @click="book_position">确 定</el-button>
+	</div>
+</el-dialog>
+
+<el-container>
+  <el-header>Amber Option Booking System</el-header>
+  <el-container>
+    <el-aside width="450px">
+		<el-form ref="form" :model="form" label-width="80px">
+			  <el-form-item label="客户">
+				<el-select
+					v-model="form.customer"
+					filterable
+					remote
+					placeholder="请选择客户"
+					:remote-method="queryCustomer">
+					<el-option
+					  v-for="item in customers"
+					  v-bind:key="item"
+					  :label="item"
+					  :value="item">
+					</el-option>
+				</el-select>
+			  </el-form-item>
+			  <el-form-item label="行权价格">
+				<el-input v-model="form.strike"></el-input>
+			  </el-form-item>
+			  <el-form-item label="到期日">
+				<el-col>
+				  <el-date-picker type="date" placeholder="选择日期" v-model="form.DTM" value-format="yyyy-MM-dd">
+				  </el-date-picker>
+				</el-col>
+			  </el-form-item>
+			  <el-form-item label="看涨看跌">
+				<el-radio-group v-model="form.put_call">
+				  <el-radio label="C">看涨</el-radio>
+				  <el-radio label="P">看跌</el-radio>
+				</el-radio-group>
+			  </el-form-item>
+			  <el-form-item label="方向">
+				<el-radio-group v-model="form.side">
+				  <el-radio label="Buy">买</el-radio>
+				  <el-radio label="Sell">卖</el-radio>
+				</el-radio-group>
+			  </el-form-item>
+			  <el-form-item label="结算币种">
+				<el-select v-model="form.settlement_ccy" placeholder="请选择币种">
+				  <el-option label="USD" value="USD"></el-option>
+				  <el-option label="BTC" value="BTC"></el-option>
+				</el-select>
+			  </el-form-item>
+			  <el-form-item label="成交价格">
+				<el-input v-model="form.price"></el-input>
+			  </el-form-item>
+			  <el-form-item label="成交数量">
+				<el-input-number v-model="form.qty" controls-position="right" :step="qty_step" :min="0.1" size="medium"></el-input-number>
+			  </el-form-item>
+			 <el-row>
+				<el-col :offset="3">
+					<el-button type="primary" :disabled="submit_disabled" @click="onSubmit">确定</el-button>
+					<el-button :type="auto_hedge_btm_type" @click="changeAutoHedge">
+						<span v-if="auto_hedge">
+							暂停对冲
+						</span>
+						<span v-else>开始对冲</span>
+					</el-button>
+					<el-button @click="config_visible = true">参数设置</el-button>
+				</el-col>
+			  </el-row>
+		</el-form>
+		
+		<el-drawer
+		  :visible.sync="config_visible"
+		  direction="ltr"
+		  custom-class="config-drawer"
+		  >
+		  <div class="config-drawer__content">
+			<el-form :model="config_form">
+			  <el-form-item label="Delta对冲周期" :label-width="formLabelWidth">
+				<el-input v-model="config_form.delta_time_limit" autocomplete="off"></el-input>
+			  </el-form-item>
+			  <el-form-item label="Delta被动成交阈值" :label-width="formLabelWidth">
+				<el-input v-model="config_form.delta_maker_limit" autocomplete="off"></el-input>
+			  </el-form-item>
+			  <el-form-item label="delta主动成交阈值" :label-width="formLabelWidth">
+				<el-input v-model="config_form.delta_taker_limit" autocomplete="off"></el-input>
+			  </el-form-item>
+			  <el-form-item label="Gamma对冲阈值" :label-width="formLabelWidth">
+				<el-input v-model="config_form.gamma_limit" autocomplete="off"></el-input>
+			  </el-form-item>
+			  <el-form-item label="Vega对冲阈值" :label-width="formLabelWidth">
+				<el-input v-model="config_form.vega_limit" autocomplete="off"></el-input>
+			  </el-form-item>
+			</el-form>
+			<div class="config-drawer__footer">
+			  <el-button @click="cancelConfigForm">取 消</el-button>
+			  <el-button type="primary" @click="submitConfigForm" :loading="cf_loading">{{ cf_loading ? '提交中 ...' : '确 定' }}</el-button>
+			</div>
+		  </div>
+		</el-drawer>
+
+	</el-aside>
+	
+    <el-main>
+		<el-row>
+			<el-table :cell-style="cellStyle"  :data="account" border height="200" :header-cell-style="{background:'#eef1f6',color:'#606266'}">
+				<el-table-column  sortable prop="type" label="">
+				</el-table-column>
+				<el-table-column label="Target" width="150">
+						<template slot-scope="scope">
+							<span v-if="scope.row.isSet">
+								<el-input size="mini" placeholder="请输入内容" v-model="target_tmp">
+								</el-input>
+							</span>
+							<span v-else>{{scope.row.target}}</span>
+							<span class="el-tag el-tag--info el-tag--mini" style="cursor: pointer;" @click="updateTarget(scope.row,true)">
+									{{scope.row.isSet?'保存':"修改"}}
+							</span>
+							<span v-if="scope.row.isSet" class="el-tag  el-tag--mini" style="cursor: pointer;" @click="updateTarget(scope.row,false)">
+									取消
+							</span>
+					</template>
+				</el-table-column>
+				<el-table-column  sortable prop="equity" label="Equity">
+				</el-table-column>
+				<el-table-column  sortable prop="pnl" label="PnL">
+				</el-table-column>
+			    <el-table-column  sortable prop="option_delta" label="Option Delta">
+				</el-table-column>
+				<el-table-column  sortable prop="future_delta" label="Future Delta" >
+				</el-table-column>
+				<el-table-column  sortable prop="account_delta" label="Account Delta">
+				</el-table-column>
+				<el-table-column  sortable prop="account_gamma" label="Account Gamma">
+				</el-table-column>
+				<el-table-column  sortable prop="account_vega" label="Account Vega">
+				</el-table-column>
+			</el-table>
+		</el-row>
+			<el-row>
+				<el-table :cell-style="cellStyle" :data="instruments" border stripe row-key="index" highlight-current-row height="380">
+					<el-table-column  sortable prop="customer" label="Customer" width=160>
+					</el-table-column>
+					<el-table-column  sortable prop="symbol" label="symbol" width=250>
+					</el-table-column>
+					<el-table-column  sortable prop="side" label="side" :formatter="sideFormatter">
+					</el-table-column>
+					<el-table-column  sortable prop="qty" label="qty">
+					</el-table-column>
+					<el-table-column  sortable prop="avg_price" label="avg_price" width=150>
+					</el-table-column>
+					<el-table-column  sortable prop="price" label="price">
+					</el-table-column>
+					<el-table-column  sortable prop="delta" label="delta" :formatter="greekFormatter">
+					</el-table-column>
+					<el-table-column  sortable prop="gamma" label="gamma" :formatter="greekFormatter">
+					</el-table-column>
+					<el-table-column  sortable prop="vega" label="vega" :formatter="greekFormatter">
+					</el-table-column>
+					<el-table-column  sortable prop="theta" label="theta" :formatter="greekFormatter">
+					</el-table-column>
+					<el-table-column  sortable prop="pnl" label="pnl">
+					</el-table-column>
+				</el-table>
+			</el-row>
+			<el-row>
+				<el-table :cell-style="cellStyle" :data="hedged_positions" border stripe row-key="id" highlight-current-row height="300">
+					<el-table-column  sortable prop="expiry" label="Expiration" width=160>
+					</el-table-column>
+					<el-table-column  sortable prop="symbol" label="symbol" width=250>
+					</el-table-column>
+					<el-table-column  sortable prop="side" label="side" :formatter="sideFormatter">
+					</el-table-column>
+					<el-table-column  sortable prop="qty" label="qty">
+					</el-table-column>
+				</el-table>
+			</el-row>				
+	</el-main>
+  </el-container>
+</el-container>
+
+</div>
+<script>
+vue_app = new Vue({
+            el: '#app',
+			data: function () {
+                return { 
+				    formLabelWidth: '140px',
+					form: {
+					  customer: "",
+					  strike: "",
+					  put_call: 'C',
+					  currency: 'BTC',
+					  settlement_ccy: 'USD',
+					  DTM:'',
+					  price:0.5,
+					  qty:0.1,
+					  side:"Buy"
+					},
+					config_form: {
+					  delta_time_limit: "",
+					  delta_maker_limit: "",
+					  delta_taker_limit: "",
+					  gamma_limit: "",
+					  vega_limit: "",
+					},
+					currency:"BTC",
+					base_currency:[
+						{name:'BTC', id:'BTC'},
+						//{name:'ETH', id:'ETH'},
+					],
+					qty_step:0.1,
+					account:[
+			 
+					],
+					auto_hedge_btm_type:"danger",
+					BookingVisible:false,
+					submit_disabled:false,
+					auto_hedge:true,
+					index_price:"",
+					target_tmp:0,
+					deribit_init_equity:0,
+					position_entry:[],
+					instruments:[],
+					hedged_positions:[],
+					customers:[],
+					selected_row:{},
+					config_visible:false,
+					cf_loading:false,
+				}
+			},
+			methods: {
+				onSubmit() {
+					const that = this;
+					
+					var reg=/^\d+$/;
+					if(!reg.test(that.form.strike))
+					{
+						that.$notify({ title: 'Error', message:"Strike price setting error", type: 'error', duration: 2000, });
+						return
+					}
+					
+					var reg = /^\d+(\.\d+)?$/;
+					if(!reg.test(that.form.price))
+					{
+						that.$notify({ title: 'Error', message:"price setting error", type: 'error', duration: 2000, });
+						return
+					}
+					
+					if(that.form.DTM=="")
+					{
+						that.$notify({ title: '警告', message:"请选择期权到期日", type: 'error', duration: 2000, });
+						return
+					}
+					
+					var today = new Date()
+					//var date_format = today.getFullYear()+"/"+(today.getMonth()+1)+"/"+today.getDate()
+					//today = new Date(date_format)
+					var DTM = new Date(that.form.DTM) 
+					
+					if(DTM<today)
+					{
+						that.$notify({ title: 'Error', message:"期权到期日需大于今天", type: 'error', duration: 2000, });
+						return
+					}
+					//that.submit_disabled = true
+	
+					var cols = ['客户','行权价格','到期日','看涨看跌','方向','币种','成交价格','成交数量']
+					var keys = ['customer','strike','DTM','put_call','side','currency','price','qty']
+					that.position_entry = []
+					for(var i in cols)
+					{		
+						var record = {
+							  'col':cols[i],
+							  'value':that.form[keys[i]]
+							}
+
+						that.position_entry.push(record)
+					}
+					that.BookingVisible = true
+					 
+			    },
+				book_position(){
+					const that = this;
+					var request_id = generateId.get()		
+					var query = {func:"book_position",args:[that.form.DTM,that.form.strike,that.form.price,that.form.currency,that.form.put_call,that.form.side,that.form.customer,that.form.qty,that.form.settlement_ccy,request_id]};
+					ws.send(JSON.stringify(query));	
+					
+				},
+				changeAutoHedge(row){
+					const that = this;
+					that.temp_auto_change = !that.auto_hedge
+					var request_id = generateId.get()		
+					var query = {func:"change_auto_hedge",args:[that.temp_auto_change,request_id]};
+					ws.send(JSON.stringify(query));		
+					
+				},
+				//修改
+                updateTarget(row, cg) {
+					const that = this;
+                    //是否是取消操作
+                    if (!cg) {      
+                        return row.isSet = false;
+                    }
+					
+					//提交数据
+					if (row.isSet) {
+						var reg = /^\d+(\.\d+)?$/;
+						if(!reg.test(that.target_tmp))
+						{
+							that.$notify({ title: 'Error', message:"account target setting error", type: 'error', duration: 2000, });
+							return
+						}
+		
+						row.isSet = false;
+						if (row.type==="Account Target")
+						{
+							var query = {func:"change_target",args:that.target_tmp};
+							ws.send(JSON.stringify(query));		
+						}else
+						{
+							vue_app.deribit_init_equity = that.target_tmp
+							row.target = that.target_tmp
+							row.pnl = (row.target - row.equity).toFixed(4)
+						}
+							
+						//that.$message({type: 'success',message: "保存成功!"}); 
+					}else {
+						//修改数据框生效
+						row.target =  that.target_tmp 
+						row.isSet = true;
+					} 
+                    //that.$refs.pointTable.setCurrentRow(); 
+                },
+				sideFormatter(row, column){
+					 if(row.side==1)
+						return "Buy"
+					 else if(row.side==-1)
+						return "Sell"
+					 else
+						return ""
+				},
+				greekFormatter(row, column){
+					var col=column.label
+					var value = row[col]*row.side*row.qty
+					if(isNaN(value))
+						return ""
+					else
+						return round2(value,5) 
+					 
+				},
+				cellStyle(row, column, rowIndex, columnIndex) {
+	
+					if(row.column.label === "PnL"){
+						return 'font-weight:bold;font-size:8px;padding:5px'
+					}else if(row.column.label === "")
+					{
+						return 'color:blue;font-size:8px;padding:5px'
+					}else{
+						return 'font-size:8px;padding:5px'
+					}
+					
+					
+				},
+				currencyChange(value){
+					const that = this;
+					if(value=="BTC")
+						that.form.strike = 6500
+					else
+						that.form.strike = 200
+			    },
+				queryCustomer(query,item) {
+					const that = this;
+					that.form.customer = query;
+					/*
+					var matched_customers = that.customers.filter(cust => cust.toLowerCase().indexOf(query) > -1)
+					if(matched_customers.length > 0)
+						return matched_customers
+					else
+						return query
+					*/
+					 
+					//return item.label.toLowerCase().indexOf(query) > -1;
+				},
+				submitConfigForm() {
+				  const that = this;
+				  if (that.cf_loading) {
+					return;
+				  }
+				  this.$confirm('确定要提交表单吗？')
+					.then(_ => {
+					  this.cf_loading = true;
+					  this.timer = setTimeout(() => {
+						// 动画关闭需要一定的时间
+						setTimeout(() => {
+						  this.cf_loading = false;
+						}, 400);
+					  }, 2000);
+					})
+					.catch(_ => {});
+				},
+				cancelConfigForm() {
+				  this.cf_loading = false;
+				  this.config_visible = false;
+				  //clearTimeout(this.timer);
+				}
+			}
+		})
+
+function initData()
+{
+	var customers_json = "data/customers.json";
+						 
+	$.get(customers_json).then(function (content) {
+		all_customers = JSON.parse(content);			
+		vue_app.customers = Object.keys(all_customers)
+	
+	});
+
+	var config_json = "library/strategy/delta_strategy.json";
+						 
+	$.get(config_json).then(function (content) {
+		var delta_config = JSON.parse(content);			
+		console.log(delta_config)
+	});
+
+}	
+
+function connect() 
+{
+	if ("WebSocket" in window) 
+	{ 
+		var wsUrl = 'ws://47.56.65.55:8082'
+		ws = new WebSocket(wsUrl); 
+		
+		ws.onopen=function(e){ // on successful connection, we want to create an initial subscription to load all the data into the page 
+			console.log('socket connection established');
+			initData();
+			//var query = {func:"register_user",args:client_ip};
+			//ws.send(JSON.stringify(query));	 
+			heartCheck.reset().start();
+		}; 
+		
+		ws.onclose=function(e){
+			reconnect(wsUrl);
+			console.log("llws连接错误!");
+		};
+		
+		ws.onmessage=function(e){ 
+			//console.log(e.data)
+			try{
+				var values = JSON.parse(e.data);
+				var fn = window[values.func];
+				fn(values.data);
+			}catch(error){
+				console.log(error)
+				console.log(e.data)
+			}
+		}; 
+		
+		ws.onerror=function(e){
+			reconnect(wsUrl);
+			console.log("llws连接错误!");
+		}; 
+
+	} 
+		else console.log('you browser dose not support websocket!');
+	
+}
+
+
+function on_book_position(data)
+{
+  vue_app.BookingVisible = false
+  vue_app.$notify({ title: 'Info', message:"booking suceeded!", type: 'success', duration: 2000, });
+  vue_app.submit_disabled = false
+}
+
+
+function on_strategy_response(data)
+{
+	if(data['type'] == 'delta')
+	{
+	  vue_app.account = []
+	  var customer_row = {
+		type:"Customer",
+		option_delta:data['customer_options_delta'],
+		pnl:vue_app.customer_pnl.toFixed(4),
+		isSet:false,
+	  }
+	  vue_app.account.push(customer_row)
+	  if(vue_app.deribit_init_equity==0)
+		vue_app.deribit_init_equity = data['target']
+	  var hedge_row = {
+		type:"Deribit Init Equity",
+		target:vue_app.deribit_init_equity,
+		equity:data['equity'],
+		pnl:(data['equity'] - vue_app.deribit_init_equity).toFixed(4),
+		option_delta:data['hedged_options_delta'],
+		future_delta:data['future_delta'],
+		isSet:false,
+	  }
+	  vue_app.account.push(hedge_row)
+	  var account_row = {
+		type:"Account Target",
+		target:data['target'],
+		equity:data['equity'],
+		pnl:(parseFloat(hedge_row['pnl']) + vue_app.customer_pnl).toFixed(4),
+		option_delta:data['account_option_delta'],
+		future_delta:data['future_delta'],
+		account_delta:data['account_delta'],
+		account_gamma:vue_app.account_gamma,
+		account_vega:vue_app.account_vega,
+		isSet:false,
+	  }
+	  vue_app.account.push(account_row)
+	  
+	  vue_app.auto_hedge = data['auto_hedge']
+	  if(vue_app.auto_hedge)
+		 vue_app.auto_hedge_btm_type = "danger"
+	  else
+		 vue_app.auto_hedge_btm_type = "success"
+	}
+	else if(data['type'] == 'gamma')
+	{
+	  vue_app.account_gamma=data['account_gamma'];
+	  vue_app.account_vega=data['account_vega'];
+	}
+	else if(data['type'] == 'user_positions')
+	{ 
+		vue_app.instruments = data['user_positoins']
+		vue_app.customer_pnl = -1*_.reduce(vue_app.instruments,function(memo,item){return memo+item.pnl},0)
+		
+		var hps = data['hedge_positions']
+		var id = 0
+		vue_app.hedged_positions = _.chain(hps)
+					  .keys()
+					  .map(function(item) { 
+					    id += 1
+						var values = item.split("_")
+						if(values[1]=="perp")
+						  var expiry = "perp"
+						else
+						  var expiry = item.split("-")[1]
+						var qty = hps[item].qty
+						var side = hps[item].side
+					    return {id:id, symbol:values[0],expiry:expiry,qty:qty,side:side}
+					    }
+					  ).groupBy(function(item){return item.expiry})
+					  .map(function(item){id += 1; return {id:id, expiry:item[0].expiry,children:item}})
+					  .value();
+ 
+		 
+	}
+	else if(data['type'] == 'auto_hedge')
+	{
+		if(data['result'])
+		{
+			vue_app.auto_hedge = vue_app.temp_auto_change
+			if(vue_app.auto_hedge)
+				vue_app.auto_hedge_btm_type = "danger"
+			else
+				vue_app.auto_hedge_btm_type = "success"
+			  vue_app.$notify({ title: 'Info', message:"自动对冲:"+vue_app.auto_hedge, type: 'success', duration: 2000, });
+		}
+		 
+	}
+	else if(data['type'] == 'target_update')
+	{
+		vue_app.account[2]['target'] = data['target']
+	    vue_app.$message({type: 'success',message: "Target更新成功!"}); 		
+	}
+		
+}
+
+function on_change_target(data)
+{
+  return; 
+}
+
+function on_change_auto_hedge(data)
+{
+	return;
+}
+
+function on_heart_check(data)
+{
+	heartCheck.reset().start(); 
+	console.log("get heart beat form server");
+}
+
+// 监听窗口关闭事件，当窗口关闭时，主动去关闭websocket连接，防止连接还没断开就关闭窗口，server端会抛异常。
+window.onbeforeunload = function() {
+	ws.close();
+} 
+
+var generateId = {
+	_count: 1,
+	get(){return ((+new Date()) + "_" + (this._count++))}
+};
+		
+var lockReconnect = false;
+function reconnect(url) {
+	if(lockReconnect) return;
+	lockReconnect = true;
+	setTimeout(function () {     //没连接上会一直重连，设置延迟避免请求过多
+		connect();
+		lockReconnect = false;
+	}, 2000);
+}
+
+function round2(number,fractionDigits){ 
+    with(Math){   
+       return round(number*pow(10,fractionDigits))/pow(10,fractionDigits);   
+   }   
+}   
+
+//心跳检测
+var heartCheck = {
+	timeout: 60000,        //1分钟发一次心跳
+	timeoutObj: null,
+	serverTimeoutObj: null,
+	reset: function(){
+		clearTimeout(this.timeoutObj);
+		clearTimeout(this.serverTimeoutObj);
+		return this;
+	},
+	start: function(){
+		var self = this;
+		this.timeoutObj = setTimeout(function(){
+			//这里发送一个心跳，后端收到后，返回一个心跳消息，
+			//onmessage拿到返回的心跳就说明连接正常
+			var query = {func:"heart_check",args:"1"};
+			ws.send(JSON.stringify(query));
+			self.serverTimeoutObj = setTimeout(function(){//如果超过一定时间还没重置，说明后端主动断开了
+				ws.close();     //如果onclose会执行reconnect，我们执行ws.close()就行了.如果直接执行reconnect 会触发onclose导致重连两次
+			}, self.timeout)
+		}, this.timeout)
+	}
+}
+		
+</script>
+</body>
+</html>
