@@ -1,0 +1,16 @@
+{
+    "file_name": "gamma_vega_hedging",
+    "strategy_name": "GammaVegaHedge",
+    "strategy_key": "GammaVegaHedge",
+    "subscription_list": [
+  
+    ],
+    "signal_names": [],
+    "account_ids": {
+      "Deribit": "test" 
+    },
+    "time_limit":1,
+    "gamma_limit":300,
+    "vega_limit":10000,
+    "contract_num":2
+  }
