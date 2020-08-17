@@ -1,0 +1,625 @@
+from utils.util_func import get_human_readable_timestamp
+from configs.typedef import TradeSide, OrderType, Direction,OrderStatus
+import numpy as np
+import pandas as pd
+import math
+import pickle
+import traceback
+from utils.util_func import *
+from configs.typedef import IntercomScope, IntercomChannel
+from datetime import datetime
+from utils.SABRLib import *
+from utils.OptionUtil import *
+
+template = "delta_template"
+
+# pre_start：交易（回测）开始前运行
+def pre_start(context, **kwargs):
+    context.logger.info(f'DemoStrategy::run before trading start: {kwargs}')
+    context.hedge_time = kwargs['hedge_time']
+    context.account_target = kwargs['account_target']
+    positions_df = kwargs['positions']
+    context.positions = get_agg_positions_set_ccy(positions_df)
+    context.hedge_positions = {'BTCUSD':{}, 'ETHUSD':{}}
+    context.delta_time_limit = kwargs['delta_time_limit']
+    context.delta_limit_taker = kwargs['delta_limit_taker']
+    context.delta_limit_maker = kwargs['delta_limit_maker']
+    #context.set_interval(10, context.subscribe_ticker)
+    #context.set_interval(6, context.self_check)
+    #context.set_interval(2, context.init_send_orders)
+    context.set_interval(5, context.hedge_delta)
+    context.set_interval(2, context.check_open_order)
+     
+def on_market_data_ticker_ready(context, data):
+    #context.logger.info(f'inside ticker {data}')
+    key = data['symbol']
+    if 'instrument_id' in data:
+        key = data['instrument_id']
+    context.symbol_dict[key] = data['metadata']
+    context.symbol_dict[key]['timestamp'] = data['timestamp']
+   
+
+def on_market_data_summaryinfo_ready(context, message):
+    today = datetime.now()
+    data = message['metadata']['summary_info']
+    summary = pd.DataFrame(data)
+    option_df = summary.dropna()
+    option_list = [[sym.split('-')[1],sym.split('-')[2],sym.split('-')[3]] \
+            for sym in option_df['instrument_id']]
+    option_list = np.array(option_list)
+    option_df['EXP_DATE'] = option_list[:,0]
+    option_df['K'] = option_list[:,1].astype(float)
+    option_df['cp'] = option_list[:,2]
+    option_df['S'] = option_df['underlying_price']
+    option_df['TTM'] = [days_diff(exp_date,today) for exp_date in option_df['EXP_DATE']]
+    option_df.to_csv('data/option_df.csv')
+    with open(f'data/option_df.pkl','wb') as fw:
+        pickle.dump(option_df, fw)
+    #optExp = pd.Series(option_df['EXP_DATE'].values.ravel()).unique()
+    #context.exp_list = [datetime.strptime("{}".format(d), '%Y%m%d') for d in optExp]
+
+
+def on_response_inspect_order_ready(context, data):
+        context.logger.info('inside inspect order')
+        context.logger.info(data) 
+        error = "error_code" in data['metadata']['metadata']
+        with context.lock:
+            if not error:
+                context.update_order(data['metadata'])
+                #order_id = data['metadata']['metadata']['order_id']
+                #if not (context.orders[order_id]['status'] == OrderStatus.Filled or context.orders[order_id]['status'] == OrderStatus.Cancelled):
+                    #context.update_position(data['metadata'])
+            else:
+                context.logger.info(f"inspect order error {data['metadata']['metadata']['error_code_msg']}")
+
+
+def on_response_cancel_order_ready(context, data):
+        context.logger.info("inside cancel order")
+        context.logger.info(data)
+        symbol_df = pd.DataFrame(context.symbol_dict).T
+        future_data = symbol_df.loc['BTCUSD']
+        metadata = data['metadata']['request']['metadata']
+        error = "error_code" in data['metadata']['metadata']
+        with context.lock:
+            if not error:
+                context.update_order(data['metadata'])
+                delta_diff = metadata['delta_diff']
+                context.order_id = None
+                #context.logger.info(f'resent:{future_data}, delta_diff:{delta_diff}')
+                context.send_limit_order(future_data,delta_diff,metadata['note'])
+            else:
+                context.logger.info(f"cancel order error:{data['metadata']['metadata']['error_code_msg']}")
+                exchange = metadata['exchange']
+                symbol = metadata['symbol'] if metadata['instrument_id'] == "" else metadata['instrument_id']
+                contract_type = metadata['contract_type']
+                order_id = metadata['order_id']
+                instrument = '|'.join([exchange, symbol, contract_type])
+                context.inspect_order(instrument,order_id,note=metadata['note'])
+   
+
+def on_position_booking(context,data):
+    instrument,qty,side,avg_price,group_date,settlement_ccy,request_id = data
+    settlement_instrument = instrument+"_"+settlement_ccy
+    with context.lock: 
+        if settlement_instrument in context.positions:
+            current_qty = context.positions[settlement_instrument]['net_qty']
+            current_avg_price = context.positions[settlement_instrument]['avg_price']
+            net_qty = qty * side + current_qty
+            new_avg_price = (current_qty*current_avg_price + qty * side *avg_price)/net_qty
+            context.positions[settlement_instrument]['net_qty'] = net_qty
+            context.positions[settlement_instrument]['avg_price'] = new_avg_price
+        else:
+            currency,exp_date,strike,cp = instrument.split("-")
+            if currency == "BTCUSD":
+                vol_SABR = context.BTC_vol_SABR
+            else:
+                vol_SABR = context.ETH_vol_SABR
+            
+            bitYield = vol_SABR['yieldCurve']['rate']
+            ttm = vol_SABR['yieldCurve']['tenor']
+            fwd = vol_SABR['fwdCurve']['rate'][0]
+            exp = datetime.strptime("{}".format(exp_date+" 16:00:00"), "%Y%m%d %H:%M:%S")
+            dtm = ((exp-datetime.now()).days+(exp-datetime.now()).seconds/3600/24)/365
+            vol = get_vol(vol_SABR, dtm, float(strike))
+            fwdYield=interp(dtm,ttm, bitYield)
+            fwd_price = fwd*math.exp(fwdYield*dtm)
+            eu_option=BSmodel(float(strike), py2ql_date(exp), cp, 'forward')
+            eu_option.price(py2ql_date(datetime.now()), fwd_price, vol, 0)
+            view = eu_option.view()
+            view['price'] = view['price']/fwd
+            context.positions[settlement_instrument] = {
+                'symbol':instrument,
+                "avg_price":avg_price,
+                'net_qty':qty * side, 
+                'group':group_date, 
+                'settlement_ccy':settlement_ccy
+            }
+            context.positions[settlement_instrument].update(view)
+
+    context.logger.info(context.positions)
+
+def on_auto_hedge(context,data):
+    with context.lock:
+        auto_hedge,request_id = data
+        context.logger.info(f'DemoStrategy::on_auto_hedge received:{data}')
+        context.auto_hedge = auto_hedge
+        context.send_data_to_user({"type":"auto_hedge","request_id":request_id,"greek":'delta'})
+
+def on_target_update(context,data):
+    with context.lock:
+        context.logger.info(f'DemoStrategy::on_target_update received:{data}')
+        context.account_target = float(data)
+        context.send_data_to_user({"type":"target_update","target":data})
+
+# on_signal_ready: 处理pricing SABR参数的回调函数
+def on_signal_ready(context, data):
+    context.logger.info(f'DemoStrategy::signal received')
+    try:
+        data['volDate'] = datetime.strptime(data['volDate'], "%Y%m%d")
+        if data['currency'] == "BTC":
+            context.BTC_vol_SABR = data
+        else:
+            context.ETH_vol_SABR = data
+        bitYield = data['yieldCurve']['rate']
+        ttm = data['yieldCurve']['tenor']
+        fwd = data['fwdCurve']['rate'][0]
+
+        for key in context.positions:
+            currency,exp,strike,cp = key.split('_')[0].split('-')
+            if currency.find(data['currency'])!=-1:
+                exp = datetime.strptime("{}".format(exp+" 16:00:00"), "%Y%m%d %H:%M:%S")
+                dtm = ((exp-datetime.now()).days+(exp-datetime.now()).seconds/3600/24)/365
+                vol = get_vol(data, dtm, float(strike))
+                fwdYield=interp(dtm,ttm, bitYield)
+                fwd_price = fwd*math.exp(fwdYield*dtm)
+                '''
+                eu_option=BSmodel(float(strike), py2ql_date(exp), cp, 'forward')
+                eu_option.price(py2ql_date(datetime.now()), fwd_price, vol, 0)
+                view = eu_option.view()
+                view['price'] = round(view['price']/fwd,4)
+                '''
+                view = {}
+                eu_option = BS([fwd_price, float(strike), 0, dtm*365], volatility=vol*100)
+                
+                price = eu_option.callPrice if cp == "C" else eu_option.putPrice
+                view['price'] = round(price/fwd,4)
+                delta = eu_option.callDelta if cp == "C" else eu_option.putDelta
+                view['delta'] = round(delta,4)
+                theta = eu_option.callTheta if cp == "C" else eu_option.putTheta
+                view['theta'] = round(theta,4)
+                view['gamma'] = round(eu_option.gamma,4)
+                view['vega'] = round(eu_option.vega,4)
+
+                context.positions[key].update(view)
+
+        for base in context.hedge_positions:
+            #hedge_df = pd.DataFrame(context.hedge_positions[base]).T
+            future_sym = base+"_perp"
+            hedged_options = {key:value for key,value in context.hedge_positions[base].items() if key!=future_sym}
+            for key in hedged_options:  
+                currency,exp,strike,cp = key.split('_')[0].split('-')
+                if currency.find(data['currency'])!=-1:
+                    exp = datetime.strptime("{}".format(exp+" 16:00:00"), "%Y%m%d %H:%M:%S")
+                    dtm = ((exp-datetime.now()).days+(exp-datetime.now()).seconds/3600/24)/365
+                    vol = get_vol(data, dtm, float(strike))
+                    fwdYield=interp(dtm,ttm, bitYield)
+                    fwd_price = fwd*math.exp(fwdYield*dtm)
+                    '''
+                    eu_option=BSmodel(float(strike), py2ql_date(exp), cp, 'forward')
+                    eu_option.price(py2ql_date(datetime.now()), fwd_price, vol, 0)
+                    view = eu_option.view()
+                    view['price'] = round(view['price']/fwd,4)
+                    '''
+                    view = {}
+                    eu_option = BS([fwd_price, float(strike), 0, dtm*365], volatility=vol*100)
+                    
+                    price = eu_option.callPrice if cp == "C" else eu_option.putPrice
+                    view['price'] = round(price/fwd,4)
+                    delta = eu_option.callDelta if cp == "C" else eu_option.putDelta
+                    view['delta'] = round(delta,4)
+                    theta = eu_option.callTheta if cp == "C" else eu_option.putTheta
+                    view['theta'] = round(theta,4)
+                    view['gamma'] = round(eu_option.gamma,4)
+                    view['vega'] = round(eu_option.vega,4)
+                    context.hedge_positions[base][key].update(view)
+                    #for col,value in view.items():
+                         #hedge_df.loc[key,col]=value
+            #context.hedge_positions[base] = hedge_df.T.to_dict()
+
+    except:
+        #context.logger.info(f"Error - volData is:{data}")
+        context.logger.error(traceback.format_exc())
+  
+# on_response_{action}_ready: 处理response的回调函数
+def on_response_place_order_ready(context, data):
+    context.logger.info(f'DemoStrategy::send order response received')
+    context.logger.info(f'in place order {data}')
+    metadata = data['metadata']
+    error = "error_code" in metadata['metadata']
+    with context.lock:
+        context.order_existed = False
+        if not error:
+            symbol = metadata['symbol'] if metadata['request']['metadata']['instrument_id']=="" else metadata['request']['metadata']['instrument_id']
+            key = symbol+'_perp'
+            #context.local_hedge_info[key] = {'group':'perp', 'greek':'delta'}
+            context.update_order(metadata)
+        else:
+            context.logger.info(f"place order error:{metadata['metadata']['error_code_msg']}")
+       
+        #context.logger.info(pd.DataFrame(context.orders).T)
+
+def on_order_ready(context, data):
+    pass
+    '''
+    context.logger.info('inside order update')
+    context.logger.info(data)
+    order_id = data['metadata']['order_id']
+    with context.lock:
+        if order_id!='0':
+            if not order_id in context.orders:
+                context.update_order(data)
+                context.update_position(data)
+            elif not (context.orders[order_id]['status'] == OrderStatus.Filled or context.orders[order_id]['status'] == OrderStatus.Cancelled):
+                context.update_order(data)
+                context.update_position(data)
+    '''
+    
+
+
+# on_position_ready: 处理position_info的回调函数
+def on_position_ready(context, data):
+    posInfoType = data['metadata']['posInfoType']
+    if posInfoType=="future_position" or posInfoType=="option_position":
+        hedge_positions = data['metadata']['metadata']
+        for col in context.position_del_cols:
+            del hedge_positions[col]
+
+        currency = data['metadata']['symbol']
+        future_sym = currency+"_perp"
+        if posInfoType=="future_position" and future_sym not in hedge_positions and future_sym in context.hedge_positions[currency]:
+            del context.hedge_positions[currency][future_sym]
+        elif posInfoType=="option_position":
+            hedged_options = {key:value for key,value in context.hedge_positions[currency].items() if key!=future_sym}
+            cleared_positions = [key for key in hedged_options if key not in hedge_positions]
+            for key in cleared_positions:
+                del context.hedge_positions[currency][key]
+
+        for key,value in hedge_positions.items():
+            position = {}
+            if hedge_positions[key]['buy_available']>0:
+                position['side'] = 1
+                position['qty'] = hedge_positions[key]['buy_available']
+            else:
+                position['side'] = -1
+                position['qty'] = hedge_positions[key]['sell_available']
+
+            if key in context.hedge_positions[currency]:
+                context.hedge_positions[currency][key].update(position)
+            else:
+                context.hedge_positions[currency][key] = position
+
+        if 'future_userinfo' in data['global_balances']:
+            context.account_equity = data['global_balances']['future_userinfo']['BTC_rights']
+            context.BTCUSD_option_value = data['global_balances']['future_userinfo']['BTCUSD_option_value']
+    
+        '''
+        hedge_position = data['metadata']['metadata']
+        for col in context.position_del_cols:
+            del hedge_position[col]
+
+        #context.hedge_positions = {key: value for key, value in context.hedge_positions.items() if key in hedge_positions}
+        symbol = data['metadata']['symbol']
+        key = symbol+"_perp"
+        if key in hedge_position:
+            perp_position = hedge_position[key]
+            if perp_position['buy_total']>0:
+                perp_position['side'] = 1
+                perp_position['qty'] = perp_position['buy_total']
+            else:
+                perp_position['side'] = -1
+                perp_position['qty'] = perp_position['sell_total']
+            
+            context.hedge_positions[key] = perp_position
+        elif key in context.hedge_positions:
+            context.logger.info(f"deleting key:{key}")
+            del context.hedge_positions[key]
+        '''
+        
+
+def update_order(context, data):
+    metadata = data['request']['metadata']
+    if 'options' in metadata:
+        del metadata['options']
+    order_id = metadata['order_id'] 
+    
+    if order_id in context.orders:
+        context.orders[order_id].update(metadata)
+        side = 1 if context.orders[order_id]['direction'].lower()=='buy' else -1
+        quantity = context.orders[order_id]['quantity']
+        symbol = context.orders[order_id]['symbol']
+    else:
+        context.orders[order_id] = metadata
+        side = 1 if metadata['direction'].lower()=='buy' else -1
+        quantity = metadata['quantity']
+        symbol = metadata['symbol']
+ 
+    status = metadata['status']
+    if status == OrderStatus.Filled or status == OrderStatus.Cancelled:
+        key = symbol + "_perp"
+        target_qty = metadata['note']['original_qty']*metadata['note']['original_side'] + side*quantity
+        target_side = 1 if target_qty > 0 else -1
+        if key in context.hedge_positions[symbol]:
+            context.hedge_positions[symbol][key]['qty'] = abs(target_qty)
+            context.hedge_positions[symbol][key]['side'] = target_side
+        else:
+            context.hedge_positions[symbol][key] = {'qty':abs(target_qty),'side':target_side}
+
+        context.sent_orderId = None
+    else:
+        context.sent_orderId = order_id
+
+    '''
+    order_df = pd.DataFrame(context.orders).T
+    order_df = order_df[context.order_cols]
+    order_df = order_df.apply(pd.to_numeric, downcast='float',errors='ignore')
+    update_kdb(order_df,'orders',context.logger)
+    
+    df_pos = pd.DataFrame(context.hedge_positions).T
+    df_pos = df_pos[context.position_cols]
+    df_pos = df_pos.apply(pd.to_numeric, downcast='float',errors='ignore')
+    update_kdb(df_pos,'p1',context.logger)
+    '''
+ 
+'''
+def update_position(context, data):
+    metadata = data['request']['metadata'] 
+    symbol = metadata['symbol'] if metadata['instrument_id']=="" else metadata['instrument_id']
+    direction = metadata['direction']
+    filled_qty = metadata['filled_quantity'] 
+    
+    if symbol not in context.hedge_positions:
+        record = {
+            'avg_price':metadata['avg_executed_price'],
+            'qty':filled_qty,
+            'side':1 if direction.lower()=='buy' else -1,
+            'close_price':metadata['avg_executed_price'],
+        }
+    else:
+        qty = context.hedge_positions[symbol]['qty']
+        if qty!=filled_qty:
+            avg_price = context.hedge_positions[symbol]['avg_price']
+            side = context.hedge_positions[symbol]['side']
+            new_side = 1 if direction.lower()=='buy' else -1
+            new_qty = qty * side + filled_qty * new_side
+            if new_qty == 0:
+                updated_qty = 0  
+                updated_side = side
+            elif new_qty > 0:
+                updated_qty = abs(new_qty)
+                updated_side = 1
+            elif new_qty < 0:
+                updated_qty = abs(new_qty)
+                updated_side = -1
+
+            amount = qty * avg_price + filled_qty * metadata['avg_executed_price']
+            total_qty = qty+filled_qty
+            if total_qty !=0:
+                new_avg_price = amount / total_qty
+            else:
+                new_avg_price = 0
+            record = {
+                'avg_price':new_avg_price,
+                'qty':updated_qty,
+                'side':updated_side,
+                'close_price':metadata['avg_executed_price'],     
+            }
+            context.hedge_positions[symbol] = record
+        
+        delta_data = {'hedge_time':context.hedge_time,'positions':context.positions,'hedge_positions':context.hedge_positions}
+        with open(f'data/delta_data.pkl','wb') as fw:
+            pickle.dump(delta_data, fw)
+        
+
+    df_pos = pd.DataFrame(context.hedge_positions).T
+    df_pos = df_pos.apply(pd.to_numeric, downcast='float',errors='ignore')
+    update_kdb(df_pos,'positions',context.logger)
+'''
+         
+# 其它
+# context.set_interval可设定周期性运行的函数
+# context.register_handler可以将回调函数注册至指定redis channel
+# 待新增
+
+def check_open_order(context):
+    context.logger.info(f'check_open_order:{datetime.now()}')
+    with context.lock:
+        open_orders={key: value for key, value in context.orders.items() if value['status']==OrderStatus.Submitted \
+                                        or value['status']==OrderStatus.PartiallyFilled or value['status']==OrderStatus.Unknown}
+        for key,value in open_orders.items():
+            '''
+            create_time = int(value['create_time'])
+            current_time = datetime.strftime(datetime.now(), "%Y%m%d%H%M%S%f")
+            current_time = int(current_time[:-3])
+            order_time_diff = current_time - create_time
+            if order_time_diff > 5000:
+            '''
+            exchange = value['exchange']
+            symbol = value['symbol'] if value['instrument_id'] == "" else value['instrument_id']
+            contract_type = value['contract_type']
+            instrument = '|'.join([exchange, symbol, contract_type])
+            context.inspect_order(instrument,key,note=value['note'])
+
+        #remove any expired positions
+        for key in list(context.positions.keys()):
+            currency,expiry,strike,cp = key.split('_')[0].split('-')
+            exp = datetime.strptime("{}".format(expiry+" 16:00:00"), "%Y%m%d %H:%M:%S")
+            dtm = ((exp-datetime.now()).days+(exp-datetime.now()).seconds/3600/24)
+            if dtm<=0:
+                del context.positions[key]
+
+
+def self_check(context):
+    """
+    do something
+    """
+    symbol_df = pd.DataFrame(context.symbol_dict).T
+    if len(symbol_df)==len(context.positions):
+        postion_df = pd.DataFrame(context.positions).T
+        symbol_df = symbol_df.join(postion_df)
+        options_index = [idx for idx in symbol_df.index if idx != 'BTCUSD']
+        option_df = symbol_df.loc[options_index]
+        #option_delta = (option_df['qty'] * option_df['side'] * option_df['delta']).sum()
+        option_delta = (option_df['net_qty'] * option_df['gamma']).sum()
+
+
+def hedge_delta(context):
+    with context.lock:
+        context.logger.info(f'hedge_delta:{datetime.now()}')
+        time_diff = datetime.now() - context.hedge_time 
+        minutes_diff = time_diff.days * 1440 + time_diff.seconds/60
+        position_df = pd.DataFrame(context.positions).T
+        #context.logger.info(f'position_df:{position_df}')
+
+        if context.account_equity!=0 and ("delta" in position_df or len(position_df)==0)and "BTCUSD" in context.symbol_dict: 
+            future_data = context.symbol_dict['BTCUSD']
+            #context.logger.info(f'inside hedge delta:{context.hedge_positions["BTCUSD"]}')
+            if 'BTCUSD_perp' in context.hedge_positions['BTCUSD']:
+                future_position = context.hedge_positions['BTCUSD']['BTCUSD_perp']
+                future_qty = future_position['qty']
+                future_side = future_position['side']
+                future_delta = future_qty*future_position['side']*10/future_data['mark_price']
+            else: 
+                future_qty = 0 
+                future_side = 0 
+                future_delta = 0
+
+            hedged_options = {key:value for key,value in context.hedge_positions['BTCUSD'].items() if key!='BTCUSD_perp'}
+            hedged_options_df = pd.DataFrame(hedged_options).T
+            if len(hedged_options_df)>0 and "delta" in hedged_options_df:
+                hedged_options_delta = (hedged_options_df['delta'] * hedged_options_df['qty'] * hedged_options_df['side']).sum()
+            else:
+                hedged_options_delta = 0
+            #options_index = [idx for idx in symbol_df.index if idx != 'BTCUSD']
+            #option_df = symbol_df.loc[options_index]
+            
+            if len(position_df) == 0:
+                usd_option_delta = 0
+                cryto_option_delta = 0
+            else:
+                cryto_settle_options = position_df[position_df['settlement_ccy']=='BTC']
+                usd_settle_options = position_df[position_df['settlement_ccy']=='USD']
+                #因为我们是客户的对手方所以需要乘以-1
+                usd_option_delta = -1*(usd_settle_options['net_qty'] * usd_settle_options['delta']).sum()
+                cryto_option_bs_delta = -1*(cryto_settle_options['net_qty'] * cryto_settle_options['delta']).sum()
+                cryto_option_premium = -1*(cryto_settle_options['net_qty'] * cryto_settle_options['avg_price']).sum()
+                cryto_option_delta = cryto_option_bs_delta - cryto_option_premium 
+            
+            hedged_options_bs_delta = hedged_options_delta - context.BTCUSD_option_value
+            customer_options_delta  = usd_option_delta + cryto_option_delta
+            total_option_delta = hedged_options_bs_delta + customer_options_delta
+            current_account_delta = context.account_equity + total_option_delta + future_delta
+            delta_diff = context.account_target - current_account_delta
+            context.logger.info(f"time diff is {minutes_diff},current_account_delta is {current_account_delta}, delta total is {round(delta_diff,4)}")
+            
+            if context.auto_hedge:
+                if  minutes_diff>context.delta_time_limit: 
+                    context.logger.info("in minutes_diff")
+                    note = {'aggresive':"maker", "original_qty":future_qty,"original_side":future_side}
+                    context.order_execution(future_data,delta_diff,note)
+                    context.hedge_time = datetime.now()
+                    delta_data = {'hedge_time':context.hedge_time,'account_target':context.account_target}
+                    with open(f'data/delta_data.pkl','wb') as fw:
+                        pickle.dump(delta_data, fw)
+                elif abs(delta_diff)>context.delta_limit_maker and abs(delta_diff)<context.delta_limit_taker:
+                    context.logger.info("in limit_maker")
+                    note = {'aggresive':"maker", "original_qty":future_qty,"original_side":future_side}
+                    context.order_execution(future_data,delta_diff,note)
+                elif abs(delta_diff)>context.delta_limit_taker:
+                    context.logger.info("in limit_taker")
+                    note = {'aggresive':"taker", "original_qty":future_qty,"original_side":future_side}
+                    context.order_execution(future_data,delta_diff,note)
+                elif not context.sent_orderId is None:
+                    context.logger.info("in exsiting order")
+                    note = {'aggresive':"maker", "original_qty":future_qty,"original_side":future_side}
+                    context.order_execution(future_data,delta_diff,note)
+
+            account_data = {
+                        'type':'delta',
+                        'target':'%.4f' % context.account_target,
+                        'equity':'%.4f' % context.account_equity,
+                        'hedged_options_delta':'%.4f' % hedged_options_bs_delta,
+                        'customer_options_delta':'%.4f' % customer_options_delta,
+                        'account_option_delta':'%.4f' % total_option_delta,
+                        'future_delta':'%.4f' % future_delta,
+                        'account_delta':'%.4f' % (-delta_diff),
+                        'auto_hedge':context.auto_hedge
+            }
+            context.send_data_to_user(account_data)
+
+            if len(position_df)!=0:
+                positions_data = {
+                    'type':'user_positions',
+                    'quotes':context.positions,
+                    'hedged_positoins':context.hedge_positions['BTCUSD']
+                }
+                context.send_data_to_user(positions_data)
+
+            '''
+            symbol_df = pd.DataFrame(context.symbol_dict).T
+            symbol_df = symbol_df[context.quote_cols]
+            symbol_df = symbol_df.apply(pd.to_numeric, downcast='float',errors='ignore')
+            update_kdb(symbol_df,'quotes',context.logger)
+            option_pnl = (option_df['qty'] * (option_df['mark_price']-option_df['avg_price'])*option_df['side']).sum()
+            future_pnl_qty_in_coin = future_row['qty']*10/future_row['avg_price']
+            future_pnl_qty_in_coin_current = future_row['qty']*10/future_row['mark_price']
+            future_pnl = (future_pnl_qty_in_coin - future_pnl_qty_in_coin_current) * future_row['side']
+            context.logger.info("-----------------------------------------")
+            context.logger.info(option_pnl)
+            context.logger.info(future_pnl)
+            context.logger.info(option_pnl+future_pnl)
+            '''    
+
+def order_execution(context,market_data,delta_diff,note):
+    if delta_diff == 0 or context.order_existed:
+        return
+    #If there is an existing order:
+    #If it's a taker order, cancel it directly
+    #If it's a maker order, cancel it if the price does not match the best price or the side is changed 
+    context.logger.info(f'sent order id is {context.sent_orderId}')
+    if not context.sent_orderId is None:
+        open_order = context.orders[context.sent_orderId]
+        context.logger.info(f'open_order is {open_order}')
+        if open_order['note']['aggresive'] == 'maker':
+            order_side = open_order['direction']
+            if delta_diff > 0:
+                side = Direction.Buy
+                best_price = market_data['best_bid']
+            elif delta_diff < 0:
+                side = Direction.Sell
+                best_price = market_data['best_ask']
+            
+            context.logger.info(f'inside order_excution, there is an exsting order, side:{side}, order_side:{order_side}, best_price:{best_price},open_price:{open_order["price"]}')
+            if side.lower()!=order_side.lower() or best_price!=open_order['price']:
+                    context.cancel_order('Deribit|BTCUSD|perp',context.sent_orderId,delta_diff=delta_diff,note=note) 
+        else:
+            context.cancel_order('Deribit|BTCUSD|perp',context.sent_orderId,delta_diff=delta_diff,note=note) 
+    else: 
+        #If there has no existing order, send order to the market
+        context.send_limit_order(market_data,delta_diff,note)
+
+
+def subscribe_ticker(context):
+    if context.subscribe_allow and len(set(context.positions))==3:
+        subscription_list = [position2instrument(symbol)+"|ticker" for symbol in set(context.positions)]
+        context._add_subscritions(IntercomScope.Market,subscription_list)
+        context.subscribe_allow = False
+
+def init_send_orders(context):
+    if not context.sent_order and len(context.symbol_dict.keys())==len(context.positions):
+        for key,value in context.symbol_dict.items():
+           if key!="BTCUSD":
+            instrument = f'Deribit|{key}|option'
+            side_index = np.random.randint(0,2)
+            trade_side = context.sides[side_index]
+            context.send_order(instrument, trade_side, 1, 0.1, OrderType.Market)
+        context.sent_order = True
