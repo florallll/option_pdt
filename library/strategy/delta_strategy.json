@@ -1,0 +1,15 @@
+{
+  "file_name": "delta_hedging",
+  "strategy_name": "Demo",
+  "strategy_key": "Demo",
+  "subscription_list": [
+
+  ],
+  "signal_names": [],
+  "account_ids": {
+    "Deribit": "test" 
+  },
+  "delta_time_limit":240,
+  "delta_limit_taker":5,
+  "delta_limit_maker":1
+}
