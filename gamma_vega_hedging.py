@@ -12,7 +12,7 @@ from datetime import datetime
 from utils.SABRLib import *
 from utils.OptionUtil import *
 
-template = "gamma_vega_template"
+template = "gamma_vega_template" 
 
 # pre_start：交易（回测）开始前运行
 def pre_start(context, **kwargs):
@@ -21,10 +21,14 @@ def pre_start(context, **kwargs):
     positions_df = kwargs['positions']
     context.positions = get_agg_positions(positions_df)
     context.hedge_positions = {'BTCUSD':{}, 'ETHUSD':{}}
+    context.currency = kwargs['currency']
     context.time_limit = kwargs['time_limit']
-    context.gamma_limit = kwargs['gamma_limit']
-    context.vega_limit = kwargs['vega_limit']
-    context.contract_num = kwargs['contract_num']
+    context.gamma_maker_limit = kwargs['gamma_maker_limit']
+    context.gamma_taker_limit = kwargs['gamma_taker_limit']
+    context.vega_maker_limit = kwargs['vega_maker_limit']
+    context.vega_taker_limit = kwargs['vega_taker_limit']
+    context.taker_spread = kwargs['taker_spread']
+    context.max_qty = kwargs['max_qty']
     #context.set_interval(6, context.self_check)
     context.set_interval(5, context.hedge_greek)
     context.set_interval(2, context.check_open_order)
@@ -109,7 +113,8 @@ def on_response_cancel_order_ready(context, data):
                     for sym in context.new_syms[group]:
                         if not sym in context.orders_existed: 
                             market_data['diff'] = context.new_syms[group][sym]['diff']
-                            note = {'aggresive':'maker', 'group':group,'target_qty':context.new_syms[group][sym]['target_qty'],'target_side':context.new_syms[group][sym]['target_side']}
+                            aggresive = context.new_syms[group][sym]['aggresive']
+                            note = {'aggresive':aggresive, 'group':group,'target_qty':context.new_syms[group][sym]['target_qty'],'target_side':context.new_syms[group][sym]['target_side']}
                             context.send_limit_order(sym,market_data,note)
                             context.logger.info(f"[SEND NEW SYM] {sym}:{note}")
             else:
@@ -152,7 +157,7 @@ def on_position_booking(context,data):
             context.positions[instrument].update(view)
 
     option_df = pd.DataFrame(context.positions).T
-    #hedge_option_df = pd.DataFrame(context.hedge_positions['BTCUSD']).T
+    
     context.baskets,instruments = context.generate_basket(option_df)
     #subscribe instruments if not already
     new_instruments = [[sym,f"Deribit|{sym}|option|ticker"] for sym in instruments if sym not in context.subscription_list]
@@ -333,9 +338,9 @@ def on_position_ready(context, data):
         '''
 
 def on_auto_hedge(context,data):
-    auto_hedge,request_id = data
+    auto_hedge,request_id,currency = data
     context.logger.info(f'DemoStrategy::on_auto_hedge received:{data}')
-    context.auto_hedge = auto_hedge
+    context.auto_hedge[currency ]= auto_hedge
     context.send_data_to_user({"type":"auto_hedge","request_id":request_id,"greek":'gamma_vega'})
 
 def update_order(context, data):
@@ -474,18 +479,24 @@ def self_check(context):
     if len(symbol_df)==len(context.hedge_positions):
         postion_df = pd.DataFrame(context.hedge_positions).T
         symbol_df = symbol_df.join(postion_df)
-        options_index = [idx for idx in symbol_df.index if idx != 'BTCUSD']
+        options_index = [idx for idx in symbol_df.index if idx != context.currency]
         option_df = symbol_df.loc[options_index]
         option_delta = (option_df['net_qty'] * option_df['gamma']).sum()
  
 
 def hedge_greek(context):
     start = datetime.now()
+    currency = context.currency
     option_df = pd.DataFrame(context.positions).T
-    hedge_option_df = pd.DataFrame(context.hedge_positions['BTCUSD']).T
+    context.logger.info(f'option_df:{option_df}')
+    hedge_option_df = pd.DataFrame(context.hedge_positions[currency]).T
+    context.logger.info(f'hedge_option_df:{hedge_option_df}')
+    from_start_to_now = datetime.now() - context.strgy_start_time 
+    warm_up_time = from_start_to_now.days * 1440 + from_start_to_now.seconds/60
+    context.logger.info(f'gamma vega hedge test !!!{currency[:3]}')
     #context.logger.info(f'hedge_option_df {hedge_option_df},option_df {option_df}')
-
     context.baskets,instruments = context.generate_basket(option_df)
+    context.logger.info(f'context.baskets:{context.baskets}')
     if len(instruments)>0:
         new_instruments = [[sym,f"Deribit|{sym}|option|ticker"] for sym in instruments if sym not in context.subscription_list]
         new_instruments = np.array(new_instruments)
@@ -495,39 +506,55 @@ def hedge_greek(context):
 
     account_gamma = 0
     account_vega = 0
+    exposure_gamma = 0
+    deribit_gamma = 0
+    exposure_vega = 0
+    deribit_vega = 0
+    
     for basket in context.baskets:
+        print('basket',basket)
         group = basket['group']
         data_dict = {}
         gammas = []
         vegas = []
         for sym in basket['syms']:
-            sym_key = sym+"_option"     
+            sym_key = sym+"_option"   
             data_dict[sym] = {}
-            if not sym_key in context.hedge_positions['BTCUSD']:     
-                context.hedge_positions['BTCUSD'][sym_key] = {'group':group}
-            elif sym in context.symbol_dict and 'gamma' in context.hedge_positions['BTCUSD'][sym_key]:
+            if not sym_key in context.hedge_positions[currency]:     
+                context.hedge_positions[currency][sym_key] = {'group':group}
+            elif sym in context.symbol_dict and 'gamma' in context.hedge_positions[currency][sym_key]:
                 data_dict[sym]['best_bid'] = context.symbol_dict[sym]['best_bid']
                 data_dict[sym]['best_ask'] = context.symbol_dict[sym]['best_ask']
                 data_dict[sym].update(hedge_option_df.loc[sym_key])
                 gammas.append(data_dict[sym]['gamma'])
                 vegas.append(data_dict[sym]['vega'])
-                   
-        if len(gammas)!=context.contract_num:
+        print('gammas!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!',gammas)
+        if len(gammas)!=len(basket['syms']):
+            print('its here !!!!!!!!!!!!!!!!!!!!')
             continue
         else:
+            print(group)
+            print(type(group))
+            print(hedge_option_df)
             hedge_group_opiton_df = hedge_option_df[hedge_option_df['group'] == group]
+            print(hedge_group_opiton_df)
             basket_option_df = option_df[option_df['group'] == group]
 
             #因为我们是客户的对手方所以需要乘以-1
             basket_bs_gamma = -1*(basket_option_df['net_qty'] * basket_option_df['gamma']).sum() 
             basket_bs_vega = -1*(basket_option_df['net_qty'] * basket_option_df['vega']).sum()
-
+            exposure_gamma += basket_bs_gamma
+            exposure_vega += basket_bs_vega
             current_hedge_gamma = (hedge_group_opiton_df['qty'] * hedge_group_opiton_df['side']*hedge_group_opiton_df['gamma']).sum() 
-            group_gamma = basket_bs_gamma - current_hedge_gamma
+            deribit_gamma += current_hedge_gamma
+            group_gamma = basket_bs_gamma + current_hedge_gamma
             account_gamma += group_gamma
             current_hedge_vega = (hedge_group_opiton_df['qty'] * hedge_group_opiton_df['side']*hedge_group_opiton_df['vega']).sum() 
-            group_vega = basket_bs_vega - current_hedge_vega
+            deribit_vega += current_hedge_vega
+            group_vega = basket_bs_vega + current_hedge_vega
             account_vega += group_vega
+
+            context.logger.info(f"[THIS IS GROUP]:{group}, group_gamma:{group_gamma}, group_vega:{group_vega}")
 
             if group_gamma >= 0 and group_vega >= 0:
                 target_side = -1
@@ -538,7 +565,7 @@ def hedge_greek(context):
                 
             try:
                 low_bound_qty = 0.1
-                up_bound_qty = abs(basket_option_df['net_qty']).sum()/context.contract_num
+                up_bound_qty = context.max_qty
                 if up_bound_qty<low_bound_qty:
                     low_bound_qty = up_bound_qty
                     up_bound_qty = 0.1
@@ -558,7 +585,7 @@ def hedge_greek(context):
                 A_eq = np.append(zeros,1)
                 A_eq = A_eq.reshape(1,len(gs)+1)
                 b_eq=np.array([1])
-                bnds = [(low_bound_qty,up_bound_qty) for i in range(context.contract_num)] 
+                bnds = [(low_bound_qty,up_bound_qty) for i in range(len(basket['syms']))] 
                 bnds.append((None,None))
                 res=op.linprog(target_func,A_ub,b_ub,A_eq,b_eq,bounds=bnds,method='interior-point')
                 
@@ -566,44 +593,36 @@ def hedge_greek(context):
                 for sym,value in data_dict.items():
                     data_dict[sym]['target_qty'] = res.x[res_i]
                     data_dict[sym]['target_side'] = target_side
-                    data_dict[sym]['diff'] = int((res.x[res_i]*target_side - value['qty']*value['side'])*10) / 10 
+                    data_dict[sym]['diff'] = res.x[res_i]*target_side - value['qty']*value['side']
                     res_i += 1
                 
                 context.logger.info(f"time takes {datetime.now()-start}")  
                 #context.logger.info(f"basket_bs_gamma is {basket_bs_gamma},current_hedge_gamma is {current_hedge_gamma},basket_bs_vega is {basket_bs_vega},current_hedge_vega is {current_hedge_vega}")
                 context.logger.info(f"group_gamma is {group_gamma},group_vega is {group_vega},data_dict:{data_dict}")
-                context.logger.info(f"gamma is hedged to {np.dot(res.x[:-1],gs)-abs(group_gamma)},vega is hedged to {np.dot(res.x[:-1],vs*10000)-abs(group_vega)}")
+                context.logger.info(f"gamma is hedged to {abs(group_gamma)-np.dot(res.x[:-1],gs)},vega is hedged to {abs(group_vega)-np.dot(res.x[:-1],vs*10000)}")
                 
-                if context.auto_hedge:
-                    if  abs(group_gamma)>context.gamma_limit or abs(group_vega)>context.vega_limit :
-                        context.logger.info("in limit beach")
-                        context.hedge_execution(group,data_dict)
-                    '''
-                        context.hedge_time = datetime.now()
-                        strategy_data = {'hedge_time':context.hedge_time}
-                        with open(f'data/gamma_data.pkl','wb') as fw:
-                            pickle.dump(strategy_data, fw)
-                            
-                    else:
-                        if symbol1 in context.sent_orders_dict:
-                            context.logger.info(f"in exsiting order {symbol1}")
-                            context.order_execution(symbol1,symbol1_tick,sym1_qty,note_gamma)
-                        if symbol2 in context.sent_orders_dict:
-                            context.logger.info(f"in exsiting order {symbol2}")
-                            context.order_execution(symbol2,symbol2_tick,sym2_qty,note_vega)
-                    '''
+                if context.auto_hedge[currency] and warm_up_time>0.5:
+                    if  abs(group_gamma)>context.gamma_maker_limit or abs(group_vega)>context.vega_maker_limit :
+                        context.logger.info("in maker limit beach")
+                        context.hedge_execution(group,group_gamma,group_vega,data_dict)
             except:
                 context.logger.error(traceback.format_exc())
                 
                 
     user_data = {
             'type':'gamma',
+            f'{currency[:3]}':{
             'account_gamma':'%.6f' % account_gamma,
             'account_vega':'%.4f' % account_vega,
+            'exposure_gamma':'%.6f' % exposure_gamma,
+            'exposure_vega':'%.4f' % exposure_vega,
+            'deribit_gamma':'%.6f' % deribit_gamma,
+            'deribit_vega':'%.4f' % deribit_vega,
+            }
     }
     context.send_data_to_user(user_data)   
   
-def hedge_execution(context,group,data_dict):
+def hedge_execution(context,group,group_gamma,group_vega,data_dict):
     with context.lock:
         if group in context.sent_orders_dict:
             cur_syms = set(context.sent_orders_dict[group])
@@ -620,12 +639,18 @@ def hedge_execution(context,group,data_dict):
         if len(out_syms) == 0:
             for sym in add_syms:
                 if not sym in context.orders_existed: 
-                    note = {'aggresive':'maker', 'group':group,'target_qty':data_dict[sym]['target_qty'],'target_side':data_dict[sym]['target_side']}
+                    aggresive = 'maker'
+                    spread = data_dict[sym]['best_ask'] - data_dict[sym]['best_bid']
+                    if spread<=context.taker_spread*context.tick_size and (abs(group_gamma)>context.gamma_taker_limit or abs(group_vega)>context.vega_taker_limit):
+                        aggresive = 'taker'
+                    context.new_syms[group][sym]['aggresive'] = aggresive
+                    note = {'aggresive':aggresive, 'group':group,'target_qty':data_dict[sym]['target_qty'],'target_side':data_dict[sym]['target_side']}
                     context.send_limit_order(sym,data_dict[sym],note)
         else:
             for sym in out_syms:
                 sent_order_id = context.sent_orders_dict[group][sym]
-                note = {'send_new':True, 'group':group,'target_qty':data_dict[sym]['target_qty'],'target_side':data_dict[sym]['target_side']}
+                open_order = context.orders[sent_order_id]
+                note = {'send_new':True, 'group':group,'target_qty':open_order['note']['target_qty'],'target_side':open_order['note']['target_side']}
                 context.cancel_order(f'Deribit|{sym}|option',sent_order_id,note=note) 
 
         for sym in in_syms:
@@ -636,7 +661,7 @@ def hedge_execution(context,group,data_dict):
             if open_order['note']['aggresive'] == 'maker':
                 order_side = open_order['direction']
                 diff = data_dict[sym]['diff']
-                if diff > 0:
+                if diff >= 0:
                     side = Direction.Buy
                     best_price = data_dict[sym]['best_bid']
                 elif diff < 0:
