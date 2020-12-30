@@ -22,6 +22,8 @@ def pre_start(context, **kwargs):
     context.hedge_positions = {'BTCUSD': {}, 'ETHUSD': {}}
     context.currency = kwargs['currency']
     context.future_delta = kwargs['future_delta']
+    context.hedge_b2b_dict = kwargs['hedge_b2b_dict']
+    # context.hedge_b2b_unsynced= kwargs['hedge_b2b_unsynced']
     context.delta_time_limit_basket2 = kwargs['delta_time_limit']
     context.delta_limit_taker_basket2 = kwargs['delta_limit_taker']
     context.delta_limit_maker_basket2 = kwargs['delta_limit_maker']
@@ -36,11 +38,11 @@ def pre_start(context, **kwargs):
     context.vega_taker_limit = kwargs['vega_taker_limit']
     context.taker_spread = kwargs['taker_spread']
     context.max_qty = kwargs['max_qty']
-    context.set_interval(2, context.check_open_order)
+    context.set_interval(1, context.check_open_order)
     context.set_interval(10, context.basket2_vega_hedge)
-    context.set_interval(5, context.basket2_delta_hedge)
+    context.set_interval(20, context.basket2_delta_hedge)
     context.set_interval(10, context.basket3_gamma_hedge)
-    context.set_interval(20, context.basket3_delta_hedge)
+    context.set_interval(60, context.basket3_delta_hedge)
 
 
 def on_market_data_ticker_ready(context, data):
@@ -81,11 +83,24 @@ def on_response_cancel_order_ready(context, data):
             booking_id = note['booking_id']
             #! cancel successful = not successful but filled
             if not error or data['metadata']['metadata']['error_code_msg'] == 'not open order':
-                # if booking_id not in context.hedge_b2b_dict:
-                #     return 
+                if not error:
+                    # if booking_id not in context.hedge_b2b_dict:
+                    #     return 
+                    # for debuging purpose
+                    filled_quantity = note['filled_quantity']
+                    context.positions[booking_id]['b2b_qty'] += filled_quantity
+                    context.positions[booking_id]['cum_qty'] = context.positions[booking_id]['b2b_qty']
+                    context.hedge_b2b_dict[booking_id]['target'] -= filled_quantity 
+                # elif data['metadata']['metadata']['error_code_msg'] == 'not open order':
+                else:
+                    filled_quantity = context.positions[booking_id]['cum_qty'] - context.positions[booking_id]['b2b_qty']
+                    context.hedge_b2b_dict[booking_id]['target'] -= filled_quantity 
+                    context.positions[booking_id]['b2b_qty'] = context.positions[booking_id]['cum_qty']
+
                 this_b2b_dict = context.hedge_b2b_dict[booking_id]
-                b2b_bid_now = price_filter_by_volume(b2b_instrument, avg = True)
                 target_qty = this_b2b_dict['target'] 
+
+                b2b_bid_now = price_filter_by_volume(b2b_instrument, avg = True)
                 if not b2b_bid_now:
                     b2b_ask_now = get_best_ask(b2b_instrument)[0]
                     if not b2b_ask_now:
@@ -202,11 +217,13 @@ def on_position_booking(context, data):
                 'symbol': instrument,
                 'avg_price': avg_price,
                 'qty': qty,
+                'group':b2b_instrument.split('-')[1],
                 'b2b_instrument': b2b_instrument,
                 'listed': listed,
                 'settlement_ccy': settlement_ccy,
                 'side': side,
                 'basket1': True
+                # 'engine': False
                 }
                 currency, exp_date, strike, cp = instrument.split("-")
                 if currency == "BTCUSD":
@@ -229,49 +246,55 @@ def on_position_booking(context, data):
                 view['price'] = view['price']/fwd_price
                 context.positions[booking_id].update(view)
                 target = qty if listed else qty*avg_price
-                time_interval = (10 + dtm*365/180*(30-10))*60
-                context.hedge_b2b_dict[booking_id] = {
-                    'booking_id': booking_id,
-                    'b2b_instrument' : b2b_instrument,
-                    'target':target,
-                    'b2b_bid':b2b_bid,
-                    'listed':listed,
-                    'time_interval' : time_interval,
-                    'finished':False,
-                    'status': 'slow'
-                    #!status:1)slow 2)fast 3)move
-                    #!move especially for when there is order still on the way but already need to move
-                    #!thus in place order ready hedge_b2b_dict can finally be deleted
-                }       
-                best_bid, bid_amount = get_best_bid(b2b_instrument)
-                if best_bid:
-                    price = best_bid
+                if target < context.lot_size:
+                    context.positions[booking_id]['basket1'] = False
+                    context.positions[booking_id].update({'b2b_qty':0,'cum_qty': 0})
                 else:
-                    best_ask = get_best_ask(b2b_instrument)[0]
-                    if best_ask:
-                        price = best_ask - context.min_tick
+                    target = qty if listed else qty*avg_price
+                    time_interval = (10 + dtm*365/180*(30-10))*60
+                    context.hedge_b2b_dict[booking_id] = {
+                        'booking_id': booking_id,
+                        'b2b_instrument' : b2b_instrument,
+                        'target':target,
+                        'b2b_bid':b2b_bid,
+                        'listed':listed,
+                        'time_interval' : time_interval,
+                        'finished':False,
+                        'status': 'slow',
+                        'engine': False
+                        #!status:1)slow 2)fast 3)move
+                        #!move especially for when there is order still on the way but already need to move
+                        #!thus in place order ready hedge_b2b_dict can finally be deleted
+                    }       
+                    best_bid, bid_amount = get_best_bid(b2b_instrument)
+                    if best_bid:
+                        price = best_bid
                     else:
-                        price = get_mark_price(b2b_instrument)                    
-                target_qty = qty if listed else target/price
-                amount = bid_amount if bid_amount else target_qty
+                        best_ask = get_best_ask(b2b_instrument)[0]
+                        if best_ask:
+                            price = best_ask - context.min_tick
+                        else:
+                            price = get_mark_price(b2b_instrument)                    
+                    target_qty = qty if listed else target/price
+                    amount = bid_amount if bid_amount else target_qty
 
-                sum_bids = get_sum_bids(b2b_instrument)
-                size_ratio = target_qty/sum_bids if sum_bids else 1
-                size_perc = 0.2 if size_ratio < 0.2 else max(1,size_ratio)
-                vol_perc = 1 if b2b_bid/price > 0.99 else size_perc
-                OrderQty = max(min(target_qty,amount*vol_perc),context.lot_size)
+                    sum_bids = get_sum_bids(b2b_instrument)
+                    size_ratio = target_qty/sum_bids if sum_bids else 1
+                    size_perc = 0.2 if size_ratio < 0.2 else max(1,size_ratio)
+                    vol_perc = 1 if b2b_bid/price > 0.99 else size_perc
+                    OrderQty = max(min(target_qty,amount*vol_perc),context.lot_size)
 
-                context.positions[booking_id].update({'b2b_qty':0,'cum_qty':OrderQty})
-                context.intercom.emit(IntercomScope.OptionPosition, IntercomChannel.FlowUpdate, context.hedge_b2b_dict[booking_id])
+                    context.positions[booking_id].update({'b2b_qty':0,'cum_qty':OrderQty})
+                    context.intercom.emit(IntercomScope.OptionPosition, IntercomChannel.FlowUpdate, context.hedge_b2b_dict[booking_id])
 
-                note = {'is_basket': False, 'booking_id': booking_id}
-                dt = max(int(np.ceil(OrderQty/target_qty*time_interval)),3)*1000 if vol_perc < 1 and OrderQty/target_qty <= 0.5 else 3000
-                context.logger.info(f"OrderQty: {OrderQty}, bid_amount:{amount}, price:{price},  time_interval:{time_interval}, dt: {dt/1000}")
-                context.send_order(f'Deribit|{b2b_instrument}|option', TradeSide.Sell, price, OrderQty, OrderType.Fak, delay = dt, client_order_id = booking_id, note = note)
-                
+                    note = {'is_basket': False, 'booking_id': booking_id}
+                    dt = max(int(np.ceil(OrderQty/target_qty*time_interval)),3)*1000 if vol_perc < 1 and OrderQty/target_qty <= 0.5 else 3000
+                    context.logger.info(f"OrderQty: {OrderQty}, bid_amount:{amount}, price:{price},  time_interval:{time_interval}, dt: {dt/1000}")
+                    context.send_order(f'Deribit|{b2b_instrument}|option', TradeSide.Sell, price, OrderQty, OrderType.Fak, delay = dt, client_order_id = booking_id, note = note)
+
+                    save_b2b_kdb(context.hedge_b2b_dict)  
+            save_current_position_kdb(context.positions)
             context.logger.info(pd.DataFrame(context.positions).T)
-            with open(f"data/{context.currency}_positions.pkl", "wb") as fw:
-                pickle.dump(context.positions, fw)
                 
 
 def on_auto_hedge(context, data):
@@ -405,6 +428,7 @@ def on_response_place_order_ready(context, data):
                         #! if slow order just arrvied and status already changed
                         if context.hedge_b2b_dict[booking_id]['status'] != 'slow':
                             if quantity - filled_quantity > 0:
+                             # slim chance this is the way !!!!
                                 context.logger.error(f'cancel failed but not fully filled : {metadata}')
                                 context.positions[booking_id]['b2b_qty'] -= (quantity - filled_quantity)
                                 context.positions[booking_id]['cum_qty'] -= (quantity - filled_quantity)
@@ -465,7 +489,6 @@ def on_response_place_order_ready(context, data):
                         context.order_existed[note['basket']] = False
                     else:
                         del context.orders_existed[instrument]
-
                     context.update_order(metadata)
         else:
             context.logger.error(f"place order error:{metadata['metadata']['error_code_msg']}")
@@ -591,8 +614,9 @@ def update_order(context, data):
             context.sent_orderId[basket] = order_id
             context.future_delta[basket]['filled'] = filled_quantity*side
 
-        with open(f"data/future_delta.pkl", "wb" ) as fw:
-            pickle.dump(context.future_delta, fw)
+        # with open(f"data/future_delta.pkl", "wb" ) as fw:
+        #     pickle.dump(context.future_delta, fw)
+        save_future_delta_kdb(context.currency, context.future_delta)
 
     else:
         if order_id in context.orders:
@@ -607,15 +631,15 @@ def update_order(context, data):
         exp_date = instrument.split('-')[1]
         status = metadata['status']
         if status == OrderStatus.Filled or status == OrderStatus.Cancelled:
-            #! using deribit positon is enough i guess??
-            target_qty = metadata['note']['target_qty']
-            target_side = metadata['note']['target_side']
-            if instrument in context.hedge_positions[symbol]:
-                # context.hedge_positions[symbol][instrument]['qty'] = target_qty
-                # context.hedge_positions[symbol][instrument]['side'] = target_side
-                pass
-            else:
-                context.hedge_positions[symbol][instrument] = {'qty': target_qty, 'side': target_side}
+            # #! using deribit positon is enough i guess??
+            # target_qty = metadata['note']['target_qty']
+            # target_side = metadata['note']['target_side']
+            # if instrument in context.hedge_positions[symbol]:
+            #     # context.hedge_positions[symbol][instrument]['qty'] = target_qty
+            #     # context.hedge_positions[symbol][instrument]['side'] = target_side
+            #     pass
+            # else:
+            #     context.hedge_positions[symbol][instrument] = {'qty': target_qty, 'side': target_side}
 
             if instrument in context.sent_orders_dict[exp_date]:
                 del context.sent_orders_dict[exp_date][instrument]
@@ -649,12 +673,18 @@ def check_open_order(context):
             currency, expiry, strike, cp = value['symbol'].split('-')
             exp = datetime.strptime("{}".format(expiry+" 16:00:00"), "%Y%m%d %H:%M:%S")
             dtm = (exp - datetime.now()).total_seconds()/3600/24
+            remove_key = []
             if dtm <= 0:
                 del context.positions[key]
-
+                remove_key.append(key)
+            if remove_key:
+                remove_from_kdb(remove_key,'cposition')
+                
     instrument = get_last_instrument(context.currency)   
     context.query_orders(f'Deribit|{context.currency}|perp')
     context.query_orders(f'Deribit|{instrument}|option')
+    save_current_position_kdb(context.positions)
+    save_b2b_kdb(context.hedge_b2b_dict)
 
 
 def basket2_vega_hedge(context):
@@ -697,8 +727,8 @@ def basket2_vega_hedge(context):
     exposure_vega = 0
     deribit_vega = 0
 
-    option_group = option_df['group'].unqiue().tolist()
-    hedge_option_group = hedge_option_df['group'].unqiue().tolist()
+    option_group = option_df['group'].unqiue()
+    hedge_option_group = hedge_option_df['group'].unqiue()
     groups = set(option_group + hedge_option_group)
     
     for group in groups:
@@ -752,6 +782,7 @@ def basket2_vega_hedge(context):
 
     user_data = {
         'type': 'gamma',
+        'basket':2,
         f'{currency[:3]}':{
         'account_gamma': '%.6f' % account_gamma,
         'account_vega': '%.4f' % account_vega,
@@ -940,7 +971,6 @@ def update_group(context):
         context.logger.error(traceback.format_exc())
         
 
-
 def market_monitor(context):
     with context.lock:
         for key,value in context.hedge_b2b_dict.items():
@@ -962,46 +992,87 @@ def market_monitor(context):
                     if context.hedge_b2b_dict[key]['status'] == 'slow':
                         context.hedge_b2b_dict[key]['status'] = 'fast'
                         if key in context.open_b2b_orders:
-                            filled_quantity = context.open_b2b_orders[key]['filled']
                             #TODO this quantity might not be fianlly filled
                             #?target should  not be  updated here maybe??
-                            value['target'] -= filled_quantity if value['listed'] else filled_quantity*value['avg_executed_price']
+                            note['filled_quantity'] = context.open_b2b_orders[key]['filled']
+                            # value['target'] -= filled_quantity if value['listed'] else filled_quantity*value['avg_executed_price']
                             context.cancel_order(f"Deribit|{value['b2b_instrument']}|option",context.open_b2b_orders[key]['order_id'], note = note)
-                        
+                        # elif context.hedge_b2b_dict[key]['engine']:
                         else:
-                            cum_qty = context.positions[key]['cum_qty']
-                            target_qty = value['target'] - cum_qty if value['listed'] else value['target']/b2b_price_now - cum_qty
+                            if not context.hedge_b2b_dict[key]['engine']:
+                                context.hedge_b2b_dict[key]['target'] -= context.positions[key]['cum_qty'] - context.positions[key]['b2b_qty']
+                                context.positions[key]['b2b_qty'] = context.positions[key]['cum_qty'] 
+                            target_qty = context.hedge_b2b_dict[key]['target']
                             
                             #!already filled but not open,target-cum_qty(all filled qty plus this order quantity)
                             if target_qty >= context.lot_size:
                                 context.send_order(f"Deribit|{value['b2b_instrument']}|option", TradeSide.Sell, b2b_price_now, target_qty, OrderType.Fak, note = note)
-                                #?if this price suitable for fak?
+                            else:
+                                if context.hedge_b2b_dict[key]['engine']:
+                                    context.positions[key]['basket1'] = True
+                                    context.hedge_b2b_dict[key]['finished'] = True
                     else:
                         context.logger.info(f'{context.hedge_b2b_dict[key]} is already in fast process')
 
-                elif 1 < value['b2b_bid']/b2b_price_now:
+                elif 1.05 < value['b2b_bid']/b2b_price_now:
                     note['action'] = 'move_to_basket'
                     if context.hedge_b2b_dict[key]['status'] == 'slow':
                         context.hedge_b2b_dict[key]['status'] = 'move'
                         if key in context.open_b2b_orders:
-                            filled_quantity = context.open_b2b_orders[key]['filled']
-                            value['target'] -= filled_quantity if value['listed'] else filled_quantity*value['avg_executed_price']
+                            note['filled_quantity'] = context.open_b2b_orders[key]['filled']
+                            # value['target'] -= filled_quantity if value['listed'] else filled_quantity*value['avg_executed_price']
                             context.cancel_order(f"Deribit|{value['b2b_instrument']}|option",context.open_b2b_orders[key]['order_id'], note = note)
                         else:
-                            cum_qty = context.positions[key]['cum_qty']
-                            target_qty = value['target'] - cum_qty if value['listed'] else value['target']/b2b_price_now - cum_qty
-                            #!already filled but not open,target-cum_qty(all filled qty plus this order quantity)
-                            #?context.positions using cum_qty already,is this step needed?
+                            
+                            if not context.hedge_b2b_dict[key]['engine']:
+                                context.positions[key]['basket1'] = False
+                                context.positions[key]['b2b_qty'] = context.positions[key]['cum_qty']
+                                #?????need review
+                            '''
+                                context.hedge_b2b_dict[key]['target'] -= context.positions[key]['cum_qty'] - context.positions[key]['b2b_qty']
+                                
+                                #!already filled but not open,target-cum_qty(all filled qty plus this order quantity)
+                                #?context.positions using cum_qty already,is this step needed?
+                            '''
+                            if context.hedge_b2b_dict[key]['engine']:
+                                target_qty = context.hedge_b2b_dict[key]['target']
+                                
+                                if target_qty >= context.lot_size:
+                                    context.positions[key]['basket1'] = False
+                                # else:
+                                #     context.positions[key]['basket1'] = True
+                                context.hedge_b2b_dict[key]['finished'] = True
+                            
                     elif context.hedge_b2b_dict[key]['status'] == 'fast':
                         context.hedge_b2b_dict[key]['status'] = 'move'
-                        cum_qty = context.positions[key]['cum_qty']
-                        target_qty = value['target'] - cum_qty if value['listed'] else value['target']/b2b_price_now - cum_qty
+                        if context.hedge_b2b_dict[key]['engine']:
+                            target_qty = context.hedge_b2b_dict[key]['target']
+                                
+                            if target_qty >= context.lot_size:
+                                context.positions[key]['basket1'] = False
+                            # else:
+                            #     context.positions[key]['basket1'] = True
+                            context.hedge_b2b_dict[key]['finished'] = True
+            
+                else:
+                    if context.hedge_b2b_dict[key]['engine']:
+                        context.hedge_b2b_dict[key]['status'] = 'slow'
+                        target_qty = context.hedge_b2b_dict[key]['target']
+                        if target_qty >= context.lot_size:
+                            context.send_order(f"Deribit|{value['b2b_instrument']}|option", TradeSide.Sell, b2b_price_now, target_qty, OrderType.Fak, note = note)
+
 
             else:
                 if 0.9 < value['b2b_bid']/b2b_price_now:
                     context.hedge_b2b_dict[key]['status'] = 'move'
                     #! if unlisted, no need to cancel,movev to basket2 directly
                     context.positions[key]['basket1'] = False
+                    if context.hedge_b2b_dict[key]['engine']:
+                        context.hedge_b2b_dict[key]['finished'] = True
+                        '''
+                        send order when slow and died in engine
+                        !!!!
+                        '''
                     
 
 def on_response_query_orders_ready(context, data):
@@ -1010,15 +1081,9 @@ def on_response_query_orders_ready(context, data):
         metadata = data['metadata']['metadata']
         orders = metadata['orders']
         context.open_b2b_orders = {v['client_order_id']:v for v in orders if v['client_order_id'] != ''}
-        with open(f"data/query_orders.pkl", "wb") as fw:
-            pickle.dump(context.open_b2b_orders, fw)
-
-
-    # for value in orders:
-    #     if value['client_order_id']:
-    #         context.open_b2b_orders[value['client_order_id']] = value
-        # else:
-        #     context.open_hedge_orders.update({value['instrument_id']: value})
+        # no need to dump, use new info every time
+        # with open(f"data/query_orders.pkl", "wb") as fw:
+        #     pickle.dump(context.open_b2b_orders, fw)
 
 
 def basket3_gamma_hedge(context):
@@ -1060,8 +1125,8 @@ def basket3_gamma_hedge(context):
     deribit_gamma = 0
     exposure_vega = 0
     deribit_vega = 0
-    option_group = option_df['group'].unqiue().tolist()
-    hedge_option_group = hedge_option_df['group'].unqiue().tolist()
+    option_group = option_df['group'].unqiue()
+    hedge_option_group = hedge_option_df['group'].unqiue()
     groups = set(option_group + hedge_option_group)
 
     today = datetime.now().date().strftime("%Y%m%d")
@@ -1104,7 +1169,7 @@ def basket3_gamma_hedge(context):
         context.logger.info(f"[THIS IS GROUP]:{group}, group_gamma:{group_gamma}, group_vega:{group_vega}")
         group_qty = option_df[option_df['group'] == group]['qty'].sum() 
         #? group_qty postitive??
-        data_dict = context.generate_basket(context.currency, group, group_qty, group_gamma, group_vega, eq = 'gamma')
+        data_dict = context.generate_basket(context.currency, group, group_qty, group_gamma, group_vega, 'gamma')
 
 
         context.logger.info(f"[basket3] group_gamma is {group_gamma},group_vega is {group_vega},data_dict:{data_dict}")
@@ -1221,7 +1286,7 @@ def basket3_delta_hedge(context):
 
                 account_data = {
                     'type': 'delta',
-                    'basket':2,
+                    'basket':3,
                     f'{context.currency[:3]}':{
                             'target': '%.4f' % context.account_target,
                             'equity': '%.4f' % context.account_equity,
@@ -1256,10 +1321,11 @@ def hedge_execution(context, group, group_gamma, group_vega, data_dict):
         context.logger.info(f'Preparing new orders,add_syms:{add_syms},context.sent_orders_dict:{context.sent_orders_dict},context.orders_existed:{context.orders_existed}')
         for sym in add_syms:
             if not sym in context.orders_existed:
-                aggresive = 'maker'
-                spread = data_dict[sym]['best_ask'] - data_dict[sym]['best_bid']
-                if spread <= context.taker_spread*context.tick_size and (abs(group_gamma) > context.gamma_taker_limit or abs(group_vega) > context.vega_taker_limit):
-                    aggresive = 'taker'
+                # aggresive = 'maker'
+                # spread = data_dict[sym]['best_ask'] - data_dict[sym]['best_bid']
+                # if spread <= context.taker_spread*context.tick_size and (abs(group_gamma) > context.gamma_taker_limit or abs(group_vega) > context.vega_taker_limit):
+                    # aggresive = 'taker'
+                aggresive = data_dict[sym]['aggresive']
                 context.new_syms[group][sym]['aggresive'] = aggresive
                 if len(out_syms) == 0:
                     note = {'aggresive': aggresive, 'group': group,
