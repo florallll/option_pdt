@@ -986,6 +986,7 @@ def market_monitor(context):
                 b2b_price_now = b2b_bid_now
 
             note = {'is_basket': False, 'booking_id': key}
+            continue_slow = False
             if value['listed']:
                 if 0.85 < value['b2b_bid']/b2b_price_now <= 1:
                     note['action'] = 'monitor_order'
@@ -1060,6 +1061,7 @@ def market_monitor(context):
                         target_qty = context.hedge_b2b_dict[key]['target']
                         if target_qty >= context.lot_size:
                             context.send_order(f"Deribit|{value['b2b_instrument']}|option", TradeSide.Sell, b2b_price_now, target_qty, OrderType.Fak, note = note)
+                        continue_slow = True
 
 
             else:
@@ -1069,11 +1071,57 @@ def market_monitor(context):
                     context.positions[key]['basket1'] = False
                     if context.hedge_b2b_dict[key]['engine']:
                         context.hedge_b2b_dict[key]['finished'] = True
-                        '''
-                        send order when slow and died in engine
-                        !!!!
-                        '''
-                    
+                else:
+                    continue_slow = True
+            
+            if continue_slow:
+                context.slow_excution(key)
+        
+            context.hedge_b2b_dict[key]['engine'] = False
+            if context.hedge_b2b_dict[key]['finished']:
+                context.intercom.emit(IntercomScope.OptionPosition, IntercomChannel.FlowUpdate, context.hedge_b2b_dict[key])
+                del context.hedge_b2b_dict[key]
+            
+
+
+def slow_excution(context, booking_id):
+    # with context.lock:
+    b2b_instrument = context.hedge_b2b_dict[booking_id]['b2b_instrument']
+    listed = context.hedge_b2b_dict[booking_id]['listed']
+    best_bid, bid_amount = get_best_bid(b2b_instrument)
+                            
+    if best_bid:
+        price = best_bid
+        amount = bid_amount
+    else:
+        best_ask = get_best_ask(b2b_instrument)[0]
+        if best_ask:
+            price = best_ask - context.min_tick
+        else:
+            price = get_mark_price(b2b_instrument)
+        amount = context.hedge_b2b_dict[booking_id]['target'] if listed else context.hedge_b2b_dict[booking_id]['target']/price
+
+    target_qty = context.hedge_b2b_dict[booking_id]['target'] if listed else context.hedge_b2b_dict[booking_id]['target']/price
+    if target_qty < context.lot_size:
+        context.hedge_b2b_dict[booking_id]['finished'] = True
+        context.intercom.emit(IntercomScope.OptionPosition, IntercomChannel.FlowUpdate, context.hedge_b2b_dict[booking_id])
+        if not listed:
+            context.positions[booking_id]['basket1'] = False
+        del context.hedge_b2b_dict[booking_id]
+        return
+    
+    sum_bids = get_sum_bids(b2b_instrument)
+    size_ratio = target_qty/sum_bids if sum_bids else 1
+    size_perc = 0.2 if size_ratio < 0.2 else max(1,size_ratio)
+    vol_perc = 1 if context.hedge_b2b_dict[booking_id]['b2b_bid']/price > 0.99 else size_perc
+    OrderQty = max(min(target_qty,amount*vol_perc),context.lot_size)
+
+    dt = max(int(np.ceil(OrderQty/target_qty*context.hedge_b2b_dict[booking_id]['time_interval'])),3)*1000 if vol_perc < 1 and OrderQty/target_qty <= 0.5 else 3000
+    context.send_order(f'Deribit|{b2b_instrument}|option', TradeSide.Sell, price, OrderQty, OrderType.Fak, delay = dt, client_order_id = booking_id, note = note)
+    context.logger.info(f"booking_id:{booking_id},target:{context.positions[booking_id]['qty']},remaining:{context.hedge_b2b_dict[booking_id]['target']},this time sent:{OrderQty},time_interval:{dt},b2b_bid:{context.hedge_b2b_dict[booking_id]['b2b_bid']},price:{price}")
+    context.intercom.emit(IntercomScope.OptionPosition, IntercomChannel.FlowUpdate, context.hedge_b2b_dict[booking_id])
+    context.positions[booking_id]['cum_qty'] += OrderQty
+
 
 def on_response_query_orders_ready(context, data):
     context.logger.info(data)
